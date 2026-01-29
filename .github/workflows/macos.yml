@@ -21,9 +21,11 @@ jobs:
     - name: build
       run: |
         mkdir build && cd build
+        export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+        echo "SDKROOT=$SDKROOT" >> "$GITHUB_ENV"
         cmake .. \
         -DWITH_OPENCL_BACKEND=OFF \
-        -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
+        -DCMAKE_OSX_SYSROOT:PATH="$SDKROOT" \
         -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/build/install
         make -j 2 install VERBOSE=ON
     - name: build CPU tests
