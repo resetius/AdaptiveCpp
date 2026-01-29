@@ -37,6 +37,8 @@ jobs:
     - name: build
       run: |
         mkdir build && cd build
+        export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+        echo "SDKROOT=$SDKROOT" >> "$GITHUB_ENV"
         cmake ../llvm/llvm -GNinja \
               -DCMAKE_BUILD_TYPE=Release \
               -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/install  \
@@ -48,6 +50,7 @@ jobs:
               -DLLVM_LINK_LLVM_DYLIB=ON \
               -DLLVM_CCACHE_BUILD=ON \
               -DCLANG_ENABLE_BOOTSTRAP=ON \
+              -DCMAKE_OSX_SYSROOT:PATH="$SDKROOT" \
               -DCLANG_BOOTSTRAP_PASSTHROUGH="CMAKE_INTSALL_PREFIX;LLVM_TARGETS_TO_BUILD;LLVM_PARALLEL_LINK_JOBS;LLVM_BUILD_LLVM_DYLIB;LLVM_LINK_LLVM_DYLIB;LLVM_CCACHE_BUILD" \
               -DBOOTSTRAP_LLVM_ENABLE_PROJECTS="clang;lld;openmp" \
               -DBOOTSTRAP_LLVM_EXTERNAL_PROJECTS=AdaptiveCpp \
