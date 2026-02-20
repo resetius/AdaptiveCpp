@@ -250,10 +250,10 @@ metal_hardware_context::metal_hardware_context(MTL::Device* device)
 
   io_registry_entry_t gpu_entry = get_gpu_entry();
 
-  _core_count = get_gpu_core_count(gpu_entry);
-  _max_clock_speed = get_gpu_max_clock_speed(gpu_entry);
-  _slc_size = get_gpu_slc_size(gpu_entry);
-  _max_allocated_size = get_max_allocated_size(_device);
+  _core_count = 1; //get_gpu_core_count(gpu_entry);
+  _max_clock_speed = 1000000; //get_gpu_max_clock_speed(gpu_entry);
+  _slc_size = 10000000; // get_gpu_slc_size(gpu_entry);
+  _max_allocated_size = 256*1025*1024; // get_max_allocated_size(_device);
 
   IOObjectRelease(gpu_entry);
 }
