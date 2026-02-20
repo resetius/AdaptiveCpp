@@ -23,7 +23,7 @@ jobs:
 
     - name: download metal-cpp
       run: |
-        curl -L -o metal-cpp.zip https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15.2_iOS18.2.zip
+        curl -L -o metal-cpp.zip https://developer.apple.com/metal/cpp/files/metal-cpp_macOS26_iOS26.zip
         unzip metal-cpp.zip -d ${GITHUB_WORKSPACE}/metal-cpp-extracted
 
     - name: build AdaptiveCpp
