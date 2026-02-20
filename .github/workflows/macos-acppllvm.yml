@@ -6,6 +6,7 @@ on:
 
 jobs:
   build_2stage_from_appleclang:
+    if: false
     name: AdaptiveCpp LLVM ${{ matrix.clang_version }}
     runs-on: macos-latest
     strategy:

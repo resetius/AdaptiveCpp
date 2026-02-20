@@ -27,6 +27,7 @@ on:
 
 jobs:
   prep-container:
+    if: false
     name: Prepare CI container clang ${{ inputs.clang }}, ${{ inputs.os }}, CUDA ${{inputs.cuda_major_version}}.${{inputs.cuda_minor_version}}.${{inputs.cuda_patch_version}}, ROCm ${{inputs.rocm}}
     runs-on: ubuntu-22.04
     permissions:

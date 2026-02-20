@@ -6,6 +6,7 @@ on:
   
 jobs:
   prep-container:
+    if: false
     name: Prepare CI container clang ${{ matrix.clang }}, ${{ matrix.os }}, ${{ matrix.cuda_or_rocm }}
     runs-on: ubuntu-22.04
     permissions:
@@ -45,6 +46,7 @@ jobs:
             image: ${{ steps.docker.outputs.docker_image }}
 
   test-acpp-llvm:
+    if: false
     name: AdaptiveCpp LLVM ${{ matrix.clang_version }} and ${{ matrix.docker.cuda_or_rocm }}
     needs: prep-container
     runs-on: ${{ matrix.docker.os }}

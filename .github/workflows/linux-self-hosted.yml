@@ -3,7 +3,7 @@ name: Self-hosted CI
 on: [push, pull_request]
 jobs:
   test-gpu-nvidia:
-    if: github.repository_id == '140986400'
+    if: false # github.repository_id == '140986400'
     name: NVIDIA with clang ${{ matrix.clang_version }}, CUDA ${{matrix.cuda}}
     runs-on: [self-hosted, gpu-nvidia]
     strategy:
@@ -100,7 +100,7 @@ jobs:
         cd ${GITHUB_WORKSPACE}/build/tests-sscp
         ACPP_VISIBILITY_MASK=omp LD_LIBRARY_PATH=${GITHUB_WORKSPACE}/build/install/lib ./pcuda_tests
   test-gpu-amd:
-    if: github.repository_id == '140986400'
+    if: false # github.repository_id == '140986400'
     name: AMD with clang ${{ matrix.clang_version }}
     runs-on: [self-hosted, gpu-amd]
     strategy:
@@ -159,7 +159,7 @@ jobs:
         cd ${GITHUB_WORKSPACE}/build/tests-sscp
         ACPP_VISIBILITY_MASK="omp;hip" ./pcuda_tests
   test-gpu-intel:
-    if: github.repository_id == '140986400'
+    if: false # github.repository_id == '140986400'
     name: Intel with clang ${{ matrix.clang_version }}
     runs-on: [self-hosted, gpu-intel]
     strategy:

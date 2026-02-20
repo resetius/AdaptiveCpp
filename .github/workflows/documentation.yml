@@ -15,6 +15,7 @@ on:
 jobs:
 
   make_documentation:
+    if: false
     name: "Build : Documentation"
 
     runs-on: ubuntu-latest
@@ -44,7 +45,7 @@ jobs:
         uses: actions/upload-pages-artifact@v3
 
   deploy_page:
-    if: github.ref == 'refs/heads/develop'
+    if: false # github.ref == 'refs/heads/develop'
 
     # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
     permissions:

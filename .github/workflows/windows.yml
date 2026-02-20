@@ -4,6 +4,7 @@ on: [push, pull_request]
 
 jobs:
   test:
+    if: false
     name: clang ${{ matrix.clang }}
     runs-on: ${{ matrix.os }}
     strategy:

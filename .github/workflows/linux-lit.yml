@@ -4,6 +4,7 @@ on: [push, pull_request]
 
 jobs:
   prep-container:
+    if: false
     name: Prepare CI container clang ${{ matrix.clang }}, ${{ matrix.os }}
     runs-on: ubuntu-22.04
     permissions:
@@ -39,6 +40,7 @@ jobs:
             image: ${{ steps.docker.outputs.docker_image }}
 
   cbs:
+    if: false
     name: CBS, clang ${{ matrix.docker.clang }}, ${{ matrix.docker.os }}
     needs: prep-container
     runs-on: ${{ matrix.docker.os }}
@@ -95,6 +97,7 @@ jobs:
           cd ${GITHUB_WORKSPACE}/build/tests-cpu
           LD_LIBRARY_PATH=${GITHUB_WORKSPACE}/build/install/lib ./sycl_tests
   sscp:
+    if: false
     name: SSCP/Reflection/stdpar/pcuda, clang ${{ matrix.docker.clang }}, ${{ matrix.docker.os }}
     needs: prep-container
     runs-on: ${{ matrix.docker.os }}

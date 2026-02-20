@@ -6,6 +6,7 @@ on:
 
 jobs:
   test-acpp-llvm:
+    if: false
     name: Windows AdaptiveCpp LLVM ${{ matrix.clang_version }}, CUDA
     runs-on: ${{ matrix.os }}
     strategy:

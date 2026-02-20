@@ -1,0 +1,67 @@
+name: macOS Metal backend
+
+on: [push, pull_request]
+
+env:
+  RUN_METAL_TESTS: 'true'
+
+jobs:
+  build_metal:
+    name: Metal backend [macOS, LLVM 20]
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+
+    - name: install dependencies
+      run: |
+        set +e
+        brew update
+        brew install llvm@20 libomp boost ninja
+        set -e
+
+    - name: download metal-cpp
+      run: |
+        curl -L -o metal-cpp.zip https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15.2_iOS18.2.zip
+        unzip metal-cpp.zip -d ${GITHUB_WORKSPACE}/metal-cpp-extracted
+
+    - name: build AdaptiveCpp
+      run: |
+        LLVM_PREFIX=$(brew --prefix llvm@20)
+        OMP_PREFIX=$(brew --prefix libomp)
+        METAL_CPP_DIR=$(ls -d ${GITHUB_WORKSPACE}/metal-cpp-extracted/metal-cpp* | head -1)
+
+        mkdir build && cd build
+        cmake .. -GNinja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_COMPILER=${LLVM_PREFIX}/bin/clang \
+          -DCMAKE_CXX_COMPILER=${LLVM_PREFIX}/bin/clang++ \
+          -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
+          -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/install \
+          -DWITH_OPENCL_BACKEND=OFF \
+          -DWITH_METAL_BACKEND=ON \
+          -DWITH_SSCP_COMPILER=ON \
+          -DACPP_EXPERIMENTAL_LLVM=ON \
+          -DACPP_LLD_PATH=${LLVM_PREFIX}/bin/ld64.lld \
+          -DMETAL_INCLUDE_DIR=${METAL_CPP_DIR} \
+          -DSEQUENTIAL_LINK_LINE=${OMP_PREFIX}/lib/libomp.dylib \
+          "-DOMP_LINK_LINE=-fopenmp ${OMP_PREFIX}/lib/libomp.dylib -L${OMP_PREFIX}/lib/" \
+          "-DOMP_CXX_FLAGS=-fopenmp -D_ENABLE_EXTENDED_ALIGNED_STORAGE -I${OMP_PREFIX}/include"
+        ninja install
+
+    - name: build generic SSCP tests
+      run: |
+        mkdir ${GITHUB_WORKSPACE}/build/tests-sscp
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        cmake -GNinja \
+          -DACPP_TARGETS="generic" \
+          -DAdaptiveCpp_DIR=${GITHUB_WORKSPACE}/install/lib/cmake/AdaptiveCpp \
+          ${GITHUB_WORKSPACE}/tests
+        ninja
+
+    - name: run Metal tests
+      if: env.RUN_METAL_TESTS == 'true'
+      run: |
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        ACPP_VISIBILITY_MASK="metal" DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib ./sycl_tests
