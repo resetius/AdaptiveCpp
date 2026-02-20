@@ -18,7 +18,7 @@ jobs:
       run: |
         set +e
         brew update
-        brew install llvm@20 libomp boost ninja
+        brew install llvm@20 boost ninja
         set -e
 
     - name: download metal-cpp
@@ -29,7 +29,6 @@ jobs:
     - name: build AdaptiveCpp
       run: |
         LLVM_PREFIX=$(brew --prefix llvm@20)
-        OMP_PREFIX=$(brew --prefix libomp)
         METAL_CPP_DIR=$(ls -d ${GITHUB_WORKSPACE}/metal-cpp-extracted/metal-cpp* | head -1)
 
         mkdir build && cd build
@@ -42,13 +41,11 @@ jobs:
           -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
           -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/install \
           -DWITH_OPENCL_BACKEND=OFF \
+          -DWITH_OPENMP_BACKEND=OFF \
           -DWITH_METAL_BACKEND=ON \
           -DACPP_COMPILER_FEATURE_PROFILE=full \
           -DACPP_LLD_PATH=${LLVM_PREFIX}/bin/ld64.lld \
-          -DMETAL_INCLUDE_DIR=${METAL_CPP_DIR} \
-          -DSEQUENTIAL_LINK_LINE=${OMP_PREFIX}/lib/libomp.dylib \
-          "-DOMP_LINK_LINE=-fopenmp ${OMP_PREFIX}/lib/libomp.dylib -L${OMP_PREFIX}/lib/" \
-          "-DOMP_CXX_FLAGS=-fopenmp -D_ENABLE_EXTENDED_ALIGNED_STORAGE -I${OMP_PREFIX}/include"
+          -DMETAL_INCLUDE_DIR=${METAL_CPP_DIR} 
         ninja install
 
     - name: build generic SSCP tests
@@ -65,4 +62,4 @@ jobs:
       if: env.RUN_METAL_TESTS == 'true'
       run: |
         cd ${GITHUB_WORKSPACE}/build/tests-sscp
-        ACPP_VISIBILITY_MASK="metal" DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib ./sycl_tests
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib ./sycl_tests
