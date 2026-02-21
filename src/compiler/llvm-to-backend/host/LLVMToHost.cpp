@@ -496,13 +496,13 @@ bool LLVMToHostTranslator::translateToBackendFormat(llvm::Module &FlavoredModule
   }
 
   HIPSYCL_DEBUG_INFO << "LLVMToHost: Invoking " << getInvocationAsString(LldInvocation) << "\n";
-  R = llvm::sys::ExecuteAndWait(LLDPath, LldInvocation, NULLOPT, Redirects);
+  R = llvm::sys::ExecuteAndWait(LLDPath, LldInvocation, NULLOPT, {} /*Redirects*/);
 
   if (R != 0) {
     std::cerr << "[AdaptiveCpp] LLVMToHost: lld invocation failed with exit code " << R << "\n";
     std::cerr << "[AdaptiveCpp] LLVMToHost: lld command: " << getInvocationAsString(LldInvocation) << "\n";
-    std::cerr << "[AdaptiveCpp] LLVMToHost: re-running lld without output suppression:\n";
-    llvm::sys::ExecuteAndWait(LLDPath, LldInvocation, NULLOPT, {});
+    //std::cerr << "[AdaptiveCpp] LLVMToHost: re-running lld without output suppression:\n";
+    //llvm::sys::ExecuteAndWait(LLDPath, LldInvocation, NULLOPT, {});
     this->registerError("LLVMToHost: lld invocation failed with exit code " + std::to_string(R));
     return false;
   }
