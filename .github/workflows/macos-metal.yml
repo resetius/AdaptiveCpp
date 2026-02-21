@@ -29,6 +29,7 @@ jobs:
     - name: build AdaptiveCpp
       run: |
         LLVM_PREFIX=$(brew --prefix llvm@20)
+        OMP_PREFIX=$(brew --prefix libomp)
         METAL_CPP_DIR=$(ls -d ${GITHUB_WORKSPACE}/metal-cpp-extracted/metal-cpp* | head -1)
 
         mkdir build && cd build
@@ -45,7 +46,10 @@ jobs:
           -DWITH_METAL_BACKEND=ON \
           -DACPP_COMPILER_FEATURE_PROFILE=full \
           -DACPP_LLD_PATH=${LLVM_PREFIX}/bin/ld64.lld \
-          -DMETAL_INCLUDE_DIR=${METAL_CPP_DIR} 
+          -DMETAL_INCLUDE_DIR=${METAL_CPP_DIR} \
+          -DSEQUENTIAL_LINK_LINE=${OMP_PREFIX}/lib/libomp.dylib \
+          "-DOMP_LINK_LINE=-fopenmp ${OMP_PREFIX}/lib/libomp.dylib -L${OMP_PREFIX}/lib/" \
+          "-DOMP_CXX_FLAGS=-fopenmp -D_ENABLE_EXTENDED_ALIGNED_STORAGE -I${OMP_PREFIX}/include"
         ninja install
 
     - name: build generic SSCP tests
