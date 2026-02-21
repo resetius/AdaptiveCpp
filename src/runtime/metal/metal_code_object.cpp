@@ -32,7 +32,7 @@ result build_metal_library_from_source(MTL::Library*& library,
   NS::Error* error = nullptr;
 
   NS::SharedPtr<MTL::CompileOptions> options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
-  options->setLanguageVersion(MTL::LanguageVersion4_0);
+  options->setLanguageVersion(MTL::LanguageVersion3_2); // temporary
   options->setOptimizationLevel(MTL::LibraryOptimizationLevel::LibraryOptimizationLevelSize);
 
   NS::String* sourceString = NS::String::string(source.c_str(),
