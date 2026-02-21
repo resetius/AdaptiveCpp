@@ -8,6 +8,7 @@
  * See file LICENSE in the project root for full license details.
  */
 // SPDX-License-Identifier: BSD-2-Clause
+#include <iostream>
 #include "hipSYCL/compiler/llvm-to-backend/host/LLVMToHost.hpp"
 
 #include "hipSYCL/common/debug.hpp"
@@ -498,6 +499,10 @@ bool LLVMToHostTranslator::translateToBackendFormat(llvm::Module &FlavoredModule
   R = llvm::sys::ExecuteAndWait(LLDPath, LldInvocation, NULLOPT, Redirects);
 
   if (R != 0) {
+    std::cerr << "[AdaptiveCpp] LLVMToHost: lld invocation failed with exit code " << R << "\n";
+    std::cerr << "[AdaptiveCpp] LLVMToHost: lld command: " << getInvocationAsString(LldInvocation) << "\n";
+    std::cerr << "[AdaptiveCpp] LLVMToHost: re-running lld without output suppression:\n";
+    llvm::sys::ExecuteAndWait(LLDPath, LldInvocation, NULLOPT, {});
     this->registerError("LLVMToHost: lld invocation failed with exit code " + std::to_string(R));
     return false;
   }
