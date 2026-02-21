@@ -8,7 +8,7 @@ env:
 jobs:
   build_metal:
     name: Metal backend [macOS, LLVM 20]
-    runs-on: macos-latest
+    runs-on: macos-26
     steps:
     - uses: actions/checkout@v4
       with:
@@ -42,7 +42,6 @@ jobs:
           -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
           -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/install \
           -DWITH_OPENCL_BACKEND=OFF \
-          -DWITH_OPENMP_BACKEND=OFF \
           -DWITH_METAL_BACKEND=ON \
           -DACPP_COMPILER_FEATURE_PROFILE=full \
           -DACPP_LLD_PATH=${LLVM_PREFIX}/bin/ld64.lld \
