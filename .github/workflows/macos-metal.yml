@@ -2,9 +2,6 @@ name: macOS Metal backend
 
 on: [push, pull_request]
 
-env:
-  RUN_METAL_TESTS: 'true'
-
 jobs:
   build_metal:
     name: Metal backend [macOS, LLVM 20]
@@ -37,21 +34,6 @@ jobs:
         METAL_CPP_DIR=$(ls -d ${GITHUB_WORKSPACE}/metal-cpp-extracted/metal-cpp* | head -1)
 
         mkdir build && cd build
-        # Three different clang roles in this build:
-        #
-        # 1. CMAKE_C/CXX_COMPILER = /usr/bin/clang++ (AppleClang, system default)
-        #    Compiles AdaptiveCpp itself (runtime, compiler passes, Metal backend).
-        #    AppleClang is sufficient — no LLVM internals are required from the
-        #    host compiler; it just links against LLVM libraries via LLVM_DIR.
-        #
-        # 2. CLANG_EXECUTABLE_PATH = llvm@20/bin/clang++  (Homebrew LLVM clang)
-        #    Used at runtime by the acpp driver to compile user SYCL kernels.
-        #    Must match LLVM_DIR so that JIT compilation uses the same LLVM
-        #    version as the installed libraries.
-        #
-        # 3. ACPP_LLD_PATH = lld@20/bin/ld64.lld  (Homebrew lld)
-        #    Linker invoked by the JIT pipeline to produce shared objects from
-        #    compiled kernel bitcode. Must be from the same LLVM toolchain.
         cmake .. -GNinja \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER=/usr/bin/clang \
@@ -81,7 +63,6 @@ jobs:
         ninja
 
     - name: run Metal tests
-      if: env.RUN_METAL_TESTS == 'true'
       run: |
         cd ${GITHUB_WORKSPACE}/build/tests-sscp
         DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib ./sycl_tests
