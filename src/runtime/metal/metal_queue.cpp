@@ -668,7 +668,13 @@ device_id metal_inorder_queue::get_device() const {
   return _device_id;
 }
 void* metal_inorder_queue::get_native_type() const {
-  return nullptr; // TODO
+  return _command_queue;
+}
+
+metal_event_handle metal_inorder_queue::reserve_render_signal() {
+  auto val = ++_event_counter;
+  _pending_gpu_event = val;
+  return {_shared_event, val};
 }
 
 result metal_inorder_queue::query_status(inorder_queue_status& status) {

@@ -209,6 +209,8 @@ public:
     return std::hash<void*>{}(_node.get());
   }
 
+  rt::dag_node_ptr AdaptiveCpp_get_dag_node() const { return _node; }
+
 
   [[deprecated("Use AdaptiveCpp_hash_code()")]]
   auto hipSYCL_hash_code() const {

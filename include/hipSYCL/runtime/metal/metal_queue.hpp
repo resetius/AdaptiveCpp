@@ -146,6 +146,12 @@ public:
 
   virtual result query_status(inorder_queue_status& status);
 
+  // Reserves a counter value for an external Metal queue to signal.
+  // The next SYCL submission on this queue will encodeWait for that value,
+  // so the GPU-side render→compute dependency is established without CPU blocking.
+  // Must be called from the same thread as SYCL submissions (no internal locking).
+  metal_event_handle reserve_render_signal();
+
   virtual result submit_sscp_kernel_from_code_object(hcf_object_id hcf_object,
     std::string_view kernel_name, const rt::hcf_kernel_info *kernel_info,
     const rt::range<3> &num_groups, const rt::range<3> &group_size,
