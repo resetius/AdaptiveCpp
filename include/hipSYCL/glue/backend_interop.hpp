@@ -45,6 +45,9 @@ template <sycl::backend b> struct backend_interop {
 #include "hip/hip_interop.hpp"
 #include "ze/ze_interop.hpp"
 #include "omp/omp_interop.hpp"
-#include "metal/metal_interop.hpp"
+// metal_interop.hpp is NOT included here: it uses the complete sycl::queue
+// type (AdaptiveCpp_inorder_executor), but this header is pulled in before
+// queue.hpp is fully defined. Include <hipSYCL/glue/metal/metal_interop.hpp>
+// manually after <sycl/sycl.hpp>.
 
 #endif
