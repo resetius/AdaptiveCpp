@@ -1,4 +1,3 @@
-// UNSUPPORTED: system-darwin
 // RUN: %acpp %s -o %t --acpp-targets=generic
 // RUN: %t | FileCheck %s
 // RUN: %acpp %s -o %t --acpp-targets=generic -O3

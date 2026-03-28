@@ -15,8 +15,78 @@
 #include "hipSYCL/compiler/utils/ProcessFunctionAnnotationsPass.hpp"
 
 #include <llvm/IR/PassManager.h>
+#include <llvm/IR/Instructions.h>
 
 namespace hipsycl::compiler {
+
+namespace {
+
+// Resolve a function pointer argument at a call site to a set of direct
+// llvm::Function* values.  Handles two cases:
+//
+//   1. Direct: the operand is already an llvm::Function* — trivial.
+//
+//   2. Itanium C1/C2 wrapper pattern (macOS):
+//      On Linux, C1 == alias(C2), so users of the annotated C2 see direct
+//      function pointers from call sites in user code.
+//      On macOS, C1 is a thin wrapper that stores its arguments to allocas
+//      (O0 ABI) and calls C2 with the loaded values:
+//
+//        main → C1(this, &myfunction1)         direct Function* ✓
+//                 store &myfunction1 → alloca
+//                 %v = load alloca
+//               C1 → C2(this, %v)              LoadInst, not Function* ✗
+//
+//      To resolve: LoadInst → AllocaInst → StoreInst → Argument of C1
+//                          → all callers of C1 at that argument position.
+//
+// Returns true and populates Result on success; false if the indirection
+// cannot be resolved (genuine user error).
+bool resolveFunctionPtrOperand(llvm::Value* V,
+                               llvm::SmallPtrSetImpl<llvm::Function*>& Result) {
+  // Case 1: direct function reference.
+  if (auto* F = llvm::dyn_cast<llvm::Function>(V)) {
+    Result.insert(F);
+    return true;
+  }
+
+  // Case 2: load from alloca → stored argument → callers of the wrapper.
+  auto* LI = llvm::dyn_cast<llvm::LoadInst>(V);
+  if (!LI || !llvm::isa<llvm::AllocaInst>(LI->getPointerOperand()))
+    return false;
+
+  // The alloca must have a single store whose value is a function argument.
+  llvm::Argument* WrapperArg = nullptr;
+  for (auto* U : LI->getPointerOperand()->users()) {
+    auto* SI = llvm::dyn_cast<llvm::StoreInst>(U);
+    if (!SI)
+      continue;
+    auto* Arg = llvm::dyn_cast<llvm::Argument>(SI->getValueOperand());
+    if (!Arg || WrapperArg) // not an arg, or more than one store
+      return false;
+    WrapperArg = Arg;
+  }
+  if (!WrapperArg)
+    return false;
+
+  // Collect direct function pointers from every call site to the wrapper.
+  llvm::Function* WrapperF = WrapperArg->getParent();
+  unsigned ArgNo = WrapperArg->getArgNo();
+  bool foundAny = false;
+  for (auto* U : WrapperF->users()) {
+    auto* CB = llvm::dyn_cast<llvm::CallBase>(U);
+    if (!CB || ArgNo >= CB->arg_size())
+      continue;
+    auto* F = llvm::dyn_cast<llvm::Function>(CB->getOperand(ArgNo));
+    if (!F)
+      return false;
+    Result.insert(F);
+    foundAny = true;
+  }
+  return foundAny;
+}
+
+} // namespace
 
 llvm::PreservedAnalyses DynamicFunctionIdentifactionPass::run(llvm::Module &M, llvm::ModuleAnalysisManager &AM) {
 
@@ -44,8 +114,10 @@ llvm::PreservedAnalyses DynamicFunctionIdentifactionPass::run(llvm::Module &M, l
         for (auto *U : F->users()) {
           if (llvm::CallBase *CB = llvm::dyn_cast<llvm::CallBase>(U)) {
             if (CB->getNumOperands() >= 1) {
-              if (auto *DF = llvm::dyn_cast<llvm::Function>(CB->getOperand(ArgNo))) {
-                Output.push_back(DF->getName().str());
+              llvm::SmallPtrSet<llvm::Function*, 4> Resolved;
+              if (resolveFunctionPtrOperand(CB->getOperand(ArgNo), Resolved)) {
+                for (auto* DF : Resolved)
+                  Output.push_back(DF->getName().str());
               } else {
                 M.getContext().emitError(
                     CB, "Detected a dynamic_function or dynamic_function_definition construction "

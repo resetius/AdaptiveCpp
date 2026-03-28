@@ -46,15 +46,31 @@ bool isReflectionAnnotatedFunction(llvm::Function* F, const utils::ProcessFuncti
   return false;
 }
 
+// Check if F directly calls any reflection-annotated function.
+// This detects the Itanium C1 constructor that wraps C2 (the annotated one).
+bool callsReflectionAnnotatedFunction(llvm::Function* F, const utils::ProcessFunctionAnnotationPass& PFA) {
+  for(auto& BB : *F) {
+    for(auto& I : BB) {
+      if(auto* CB = llvm::dyn_cast<llvm::CallBase>(&I)) {
+        if(auto* CalledF = CB->getCalledFunction()) {
+          if(isReflectionAnnotatedFunction(CalledF, PFA))
+            return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 bool isAnyUserReflectionAnnotatedFunction(llvm::Function* F, const utils::ProcessFunctionAnnotationPass& PFA) {
   for(auto* U : F->users()) {
     if(auto* CB = llvm::dyn_cast<llvm::CallBase>(U)) {
       auto* CalledF = CB->getCalledFunction();
       if(CalledF && (CalledF != F)) {
-      
-        if(isReflectionAnnotatedFunction(CalledF, PFA))
+        // Direct match or thin wrapper calling an annotated function (C1->C2 ABI split)
+        if(isReflectionAnnotatedFunction(CalledF, PFA) ||
+           callsReflectionAnnotatedFunction(CalledF, PFA))
           return true;
-      
       }
     }
   }
