@@ -307,6 +307,7 @@ if(WITH_SSCP_COMPILER)
       LIBRARY
         metal/LLVMToMetal.cpp
         metal/HLExtractionPass.cpp
+        metal/AddrSpaceCastCanonicalizationPass.cpp
         metal/HLTree.cpp
         metal/Emitter.cpp
       TOOL metal/LLVMToMetalTool.cpp)
