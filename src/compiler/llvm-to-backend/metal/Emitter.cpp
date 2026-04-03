@@ -82,7 +82,9 @@ std::optional<std::string> extractStringConstant(llvm::Value* V, std::string& er
   if (auto* gv = llvm::dyn_cast<llvm::GlobalVariable>(V)) {
     GV = gv;
   } else if (auto* CE = llvm::dyn_cast<llvm::ConstantExpr>(V)) {
-    if (CE->getOpcode() == llvm::Instruction::GetElementPtr) {
+    if (CE->getOpcode() == llvm::Instruction::AddrSpaceCast) {
+      return extractStringConstant(CE->getOperand(0), errorStr);
+    } else if (CE->getOpcode() == llvm::Instruction::GetElementPtr) {
       GV = llvm::dyn_cast<llvm::GlobalVariable>(CE->getOperand(0));
     }
   }
