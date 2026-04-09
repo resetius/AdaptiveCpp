@@ -10,6 +10,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 #include "hipSYCL/compiler/llvm-to-backend/metal/LLVMToMetal.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/metal/AddrSpaceCastCanonicalizationPass.hpp"
+#include "hipSYCL/compiler/llvm-to-backend/metal/PointerTranslationAnnotationPass.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/AddressSpaceInferencePass.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/AddressSpaceMap.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/LLVMToBackend.hpp"
@@ -550,6 +551,7 @@ bool LLVMToMetalTranslator::translateToBackendFormat(llvm::Module& FlavoredModul
     MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
     MPM.addPass(std::move(ASIPass));
     MPM.addPass(AddrSpaceCastCanonicalizationPass());
+    MPM.addPass(PointerTranslationAnnotationPass(ASMap[AddressSpace::Global]));
     MPM.run(FlavoredModule, MAM);
     return true;
   });
