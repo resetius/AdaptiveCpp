@@ -12,6 +12,7 @@
 #include "hipSYCL/compiler/llvm-to-backend/metal/AddrSpaceCastCanonicalizationPass.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/metal/GlobalPtrLoadPromotionPass.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/metal/PointerTranslationAnnotationPass.hpp"
+#include "hipSYCL/compiler/llvm-to-backend/metal/PointerTranslationPass.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/AddressSpaceInferencePass.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/AddressSpaceMap.hpp"
 #include "hipSYCL/compiler/llvm-to-backend/LLVMToBackend.hpp"
@@ -554,6 +555,7 @@ bool LLVMToMetalTranslator::translateToBackendFormat(llvm::Module& FlavoredModul
     MPM.addPass(GlobalPtrLoadPromotionPass(ASMap[AddressSpace::Global]));
     MPM.addPass(AddrSpaceCastCanonicalizationPass());
     MPM.addPass(PointerTranslationAnnotationPass(ASMap[AddressSpace::Global]));
+    MPM.addPass(PointerTranslationPass(ASMap[AddressSpace::Global]));
     MPM.run(FlavoredModule, MAM);
     return true;
   });

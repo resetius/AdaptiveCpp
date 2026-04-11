@@ -310,6 +310,7 @@ if(WITH_SSCP_COMPILER)
         metal/AddrSpaceCastCanonicalizationPass.cpp
         metal/GlobalPtrLoadPromotionPass.cpp
         metal/PointerTranslationAnnotationPass.cpp
+        metal/PointerTranslationPass.cpp
         metal/HLTree.cpp
         metal/Emitter.cpp
       TOOL metal/LLVMToMetalTool.cpp)

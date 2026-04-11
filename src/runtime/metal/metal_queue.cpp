@@ -179,8 +179,35 @@ result launch_kernel_from_library(
 
   encoder->setThreadgroupMemoryLength(align_up(local_mem_size, 16), 0);
 
-  const NS::UInteger buf_offset = 1; // buffer(0) is reserved for dynamic local memory size, so start from 1
+  const NS::UInteger buf_offset = 2; // buffer(0) is reserved for dynamic local memory size, buffer(1) for host-to-device address difference, so start from 2
   encoder->setBytes(&user_local_mem_size, sizeof(uint32_t), 0);
+
+  // TODO: This is a temporary approximation that samples the gpu-to-host
+  // address delta from the first shared USM pointer argument. This is INCORRECT
+  // in general: each MTL::Buffer created independently via newBuffer() can land
+  // at a different (gpuAddress() - contents()) offset.
+  //
+  // The correct fix is to replace metal_allocator with a multi-level
+  // general-purpose allocator backed by a single large mmap()'d region. All
+  // sub-allocations are handed out from that region, and each sub-range is
+  // wrapped into a MTL::Buffer using newBufferWithBytesNoCopy() which creates a
+  // Metal buffer at an existing host address without copying. Because the entire
+  // region is a single mmap() reservation, the gpu-to-host offset is uniform
+  // across all allocations and can be queried once at queue creation time rather
+  // than sampled per-dispatch.
+  int64_t addr_diff = 0;
+  for (std::size_t i = 0; i < num_args && addr_diff == 0; ++i) {
+    if (!is_pointer_arg[i])
+      continue;
+    void *usm_ptr = *reinterpret_cast<void **>(args[i]);
+    auto [buf, offset, alloc_type] = allocator->get_usm_block(usm_ptr);
+    if (buf && alloc_type == metal_allocator::usm_alloc_type::shared) {
+      uint64_t gpu_base   = buf->gpuAddress();
+      uintptr_t host_base = reinterpret_cast<uintptr_t>(usm_ptr) - offset;
+      addr_diff = static_cast<int64_t>(gpu_base - host_base);
+    }
+  }
+  encoder->setBytes(&addr_diff, sizeof(int64_t), 1);
   std::vector<NS::SharedPtr<MTL::Buffer>> buffers_out;
   if (!arg_buffer_used) {
     encode_arguments(encoder, device, allocator, args, arg_sizes, num_args, is_pointer_arg, buf_offset);
