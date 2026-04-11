@@ -136,6 +136,125 @@ GlobalPtrLoadPromotionPass::run(Module &M, ModuleAnalysisManager &MAM) {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 1b – Track global-pointer values through private (AS 5) allocas.
+    //
+    // The GPU optimizer frequently spills pointer stacks into private (AS 5)
+    // memory using alloca.  A typical pattern is an iterative tree/list
+    // traversal that pushes/pops Node* values on a local array:
+    //
+    //   %stk = alloca [N x ptr], addrspace(5)
+    //   store ptr %node_generic, ptr addrspace(5) %slot   ; AS1→0 downcast first
+    //   %loaded = load ptr, ptr addrspace(5) %slot        ; comes back as generic
+    //
+    // Because the stored value went through addrspacecast (AS1→0) before the
+    // store, the load result appears to be a plain generic pointer.  Phase 1's
+    // main worklist stops here and does not mark %loaded as logically global,
+    // so later pointer loads through %loaded (e.g. node->left, node->right)
+    // are invisible to the AnnotationPass and never get address-translated.
+    //
+    // We recover the information with a two-step scan:
+    //   (a) Identify AS 5 allocas that receive at least one store of a value
+    //       that is already in LogicallyGlobal.  These allocas are used purely
+    //       as typed pointer stacks — it is safe to treat every load from them
+    //       as logically global (conservative but sound).
+    //   (b) Seed all pointer-typed loads from those allocas and re-run the
+    //       worklist so the newly promoted values propagate further.
+    // -----------------------------------------------------------------------
+
+    // Helper: strip GEPs (and any addrspacecasts) to reach the underlying
+    // alloca, or return nullptr if the root is not an alloca.
+    auto getAllocaRoot = [](Value *V) -> Value * {
+      while (true) {
+        if (auto *GEP = dyn_cast<GetElementPtrInst>(V)) {
+          V = GEP->getPointerOperand();
+          continue;
+        }
+        if (auto *ASC = dyn_cast<AddrSpaceCastInst>(V)) {
+          V = ASC->getPointerOperand();
+          continue;
+        }
+        break;
+      }
+      return isa<AllocaInst>(V) ? V : nullptr;
+    };
+
+    // (a) Find AS 5 allocas that hold logically-global pointer values.
+    DenseSet<Value *> GlobalAllocas;
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        auto *SI = dyn_cast<StoreInst>(&I);
+        if (!SI)
+          continue;
+        if (SI->getPointerOperand()->getType()->getPointerAddressSpace() != 5)
+          continue;
+        Value *StoredVal = SI->getValueOperand();
+        if (!StoredVal->getType()->isPointerTy())
+          continue;
+        if (!LogicallyGlobal.count(StoredVal))
+          continue;
+        if (Value *Root = getAllocaRoot(SI->getPointerOperand()))
+          GlobalAllocas.insert(Root);
+      }
+    }
+
+    // (b) Seed pointer-typed loads from those allocas and re-run the worklist.
+    if (!GlobalAllocas.empty()) {
+      for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+          auto *LI = dyn_cast<LoadInst>(&I);
+          if (!LI || !LI->getType()->isPointerTy())
+            continue;
+          if (LI->getPointerOperand()->getType()->getPointerAddressSpace() != 5)
+            continue;
+          if (Value *Root = getAllocaRoot(LI->getPointerOperand()))
+            if (GlobalAllocas.count(Root))
+              Seed(LI);
+        }
+      }
+      // Re-run the worklist to propagate the newly seeded values.
+      while (!Worklist.empty()) {
+        Value *V = Worklist.pop_back_val();
+        for (User *U : V->users()) {
+          if (LogicallyGlobal.count(U))
+            continue;
+          auto *I = dyn_cast<Instruction>(U);
+          if (!I || !I->getType()->isPointerTy())
+            continue;
+          if (auto *ASC = dyn_cast<AddrSpaceCastInst>(I)) {
+            if (ASC->getOperand(0)->getType()->getPointerAddressSpace() == GlobalAS &&
+                ASC->getType()->getPointerAddressSpace() == 0)
+              Seed(ASC);
+            continue;
+          }
+          if (auto *GEP = dyn_cast<GetElementPtrInst>(I)) {
+            if (GEP->getPointerOperand() == V)
+              Seed(GEP);
+            continue;
+          }
+          if (auto *LI = dyn_cast<LoadInst>(I)) {
+            if (LI->getPointerOperand() == V && LI->getType()->isPointerTy())
+              Seed(LI);
+            continue;
+          }
+          if (auto *Phi = dyn_cast<PHINode>(I)) {
+            bool AnyNonGlobal = false;
+            for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
+              unsigned AS =
+                  Phi->getIncomingValue(i)->getType()->getPointerAddressSpace();
+              if (isExplicitlyNonGlobal(AS, GlobalAS)) {
+                AnyNonGlobal = true;
+                break;
+              }
+            }
+            if (!AnyNonGlobal)
+              Seed(Phi);
+            continue;
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
     // Phase 2 – Rewrite: create promoted (AS=GlobalAS) versions of all
     // logically-global values that are currently typed as AS=0.
     // -----------------------------------------------------------------------
@@ -200,21 +319,41 @@ GlobalPtrLoadPromotionPass::run(Module &M, ModuleAnalysisManager &MAM) {
 
         if (auto *LI = dyn_cast<LoadInst>(&I)) {
           Value *PromPtr = GetPromoted(LI->getPointerOperand());
-          if (!PromPtr)
+          if (PromPtr) {
+            // Standard case: the pointer operand was promoted to GlobalAS;
+            // emit a new load of GlobalPtrTy from the promoted address.
+            IRBuilder<> Builder(LI);
+            LoadInst *NewLI = Builder.CreateLoad(GlobalPtrTy, PromPtr,
+                                                 LI->getName() + ".pg");
+            NewLI->setAlignment(LI->getAlign());
+            NewLI->setOrdering(LI->getOrdering());
+            NewLI->setSyncScopeID(LI->getSyncScopeID());
+            NewLI->setVolatile(LI->isVolatile());
+            NewLI->setDebugLoc(LI->getDebugLoc());
+            SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+            LI->getAllMetadata(MDs);
+            for (auto &MD : MDs)
+              NewLI->setMetadata(MD.first, MD.second);
+            Promoted[LI] = NewLI;
             continue;
-          IRBuilder<> Builder(LI);
-          LoadInst *NewLI = Builder.CreateLoad(GlobalPtrTy, PromPtr,
-                                               LI->getName() + ".pg");
-          NewLI->setAlignment(LI->getAlign());
-          NewLI->setOrdering(LI->getOrdering());
-          NewLI->setSyncScopeID(LI->getSyncScopeID());
-          NewLI->setVolatile(LI->isVolatile());
-          NewLI->setDebugLoc(LI->getDebugLoc());
-          SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
-          LI->getAllMetadata(MDs);
-          for (auto &MD : MDs)
-            NewLI->setMetadata(MD.first, MD.second);
-          Promoted[LI] = NewLI;
+          }
+
+          // Phase 1b case: load from an AS 5 (private) alloca that was
+          // identified as holding logically-global pointer values.
+          //
+          // The load itself cannot be rewritten to load GlobalPtrTy — the
+          // AS 5 slot stores a generic (AS 0) copy of the original AS 1
+          // pointer.  Instead we insert an addrspacecast immediately after
+          // the load to "re-widen" the generic result back to GlobalAS.
+          // This single cast is enough to let all downstream GEPs and loads
+          // (node->left, node->right, …) be promoted through the standard
+          // Phase 2b path on their next iteration.
+          if (LI->getPointerOperand()->getType()->getPointerAddressSpace() == 5) {
+            IRBuilder<> Builder(LI->getNextNode());
+            Value *Cast = Builder.CreateAddrSpaceCast(LI, GlobalPtrTy,
+                                                      LI->getName() + ".pg");
+            Promoted[LI] = Cast;
+          }
           continue;
         }
       }
@@ -255,6 +394,10 @@ GlobalPtrLoadPromotionPass::run(Module &M, ModuleAnalysisManager &MAM) {
     // those instructions are being erased.  For all other users we insert a
     // downcast (GlobalAS → 0) so that the surrounding code continues to
     // receive a generic pointer.
+    //
+    // Special case (Phase 1b / AS5): Promoted[LI] = addrspacecast(LI, GlobalAS)
+    // — the new value USES the old value directly.  We must NOT patch that
+    // self-referential use (it would create a circular dependency in the IR).
     for (auto &[OldVal, NewVal] : Promoted) {
       SmallVector<Use *, 8> Uses;
       for (Use &U : OldVal->uses())
@@ -266,6 +409,9 @@ GlobalPtrLoadPromotionPass::run(Module &M, ModuleAnalysisManager &MAM) {
           continue;
         // Skip if the using instruction is itself being replaced.
         if (Promoted.count(UserInst))
+          continue;
+        // Skip if the user IS the promoted value (AS5 addrspacecast case).
+        if (UserInst == NewVal)
           continue;
 
         // Insert a downcast immediately before the using instruction.
@@ -280,9 +426,22 @@ GlobalPtrLoadPromotionPass::run(Module &M, ModuleAnalysisManager &MAM) {
     //
     // The old instructions may still reference each other (cycles through
     // PHIs).  Drop all references first to break the cycles, then erase.
+    //
+    // Exception: if the promoted value uses the old instruction directly
+    // (Phase 1b / AS5 addrspacecast case), the old instruction is still
+    // live and must NOT be erased.
     SmallVector<Instruction *, 16> ToErase;
     for (auto &[OldVal, NewVal] : Promoted) {
-      if (auto *OldInst = dyn_cast<Instruction>(OldVal))
+      auto *OldInst = dyn_cast<Instruction>(OldVal);
+      if (!OldInst)
+        continue;
+      // Check if the promoted value is an instruction that directly uses OldInst.
+      bool NewUsesOld = false;
+      if (auto *NewInst = dyn_cast<Instruction>(NewVal)) {
+        for (Use &U : NewInst->operands())
+          if (U.get() == OldInst) { NewUsesOld = true; break; }
+      }
+      if (!NewUsesOld)
         ToErase.push_back(OldInst);
     }
     for (Instruction *I : ToErase)
