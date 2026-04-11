@@ -1170,7 +1170,11 @@ void MetalEmitter::emitFCmpInstruction(const FCmpInst* FC, const std::string& na
 void MetalEmitter::emitGEPInstruction(const GetElementPtrInst* GEP, const std::string& name, int level) {
   std::string base = emitExpr(GEP->getPointerOperand());
   Type* srcElemType = GEP->getSourceElementType();
-  std::string typeName = mapType(srcElemType);
+  // Pointer-typed elements (e.g., ptr[]) cannot be expressed in MSL as
+  // "device void**" — the nested address space is invalid syntax.
+  // Treat pointer-element arrays as arrays of ulong (8 bytes = pointer size
+  // on 64-bit Metal) so that indexed addressing compiles cleanly.
+  std::string typeName = srcElemType->isPointerTy() ? "ulong" : mapType(srcElemType);
 
   unsigned physAS = getPhysicalPointerAddressSpace(GEP->getPointerOperand());
   std::string addrSpace = getAddressSpaceKeyword(physAS);
