@@ -133,6 +133,16 @@ static bool canonicalizeConstantAddrSpaceCasts(Module &M) {
 /// instructions are collapsed.  Unsupported instructions will cause the cast
 /// to remain in place.
 static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
+  // Only remove downcasts (source AS is more specific than dest AS).
+  // Upcasts (generic AS=0 → specific AS=N) were inserted by the address space
+  // inference pass to mark pointers as living in a particular space.  Removing
+  // them would propagate the generic AS=0 source back through GEPs and PHIs,
+  // silently downgrading address space information.
+  unsigned SrcAS = Cast->getOperand(0)->getType()->getPointerAddressSpace();
+  unsigned DstAS = Cast->getType()->getPointerAddressSpace();
+  if (SrcAS == 0 && DstAS != 0)
+    return false;
+
   bool Changed = false;
   Value *Src = Cast->getOperand(0);
   // Worklist of (old value, replacement value) pairs.  Using a vector
@@ -244,6 +254,30 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
       }
 
       if (auto *Phi = dyn_cast<PHINode>(U)) {
+        // Before creating a replacement PHI, check that every incoming value
+        // that we are NOT replacing is already compatible with the new type
+        // (i.e. has the same address space as NewVal).  If any unreplaced
+        // incoming has a different address space, promoting this PHI would
+        // produce invalid IR — bail out instead.
+        Type *NewTy = NewVal->getType();
+        bool Compatible = true;
+        for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
+          Value *Incoming = Phi->getIncomingValue(i);
+          if (Incoming == OldVal)
+            continue; // this slot is being replaced
+          auto MIt = Replacements.find(Incoming);
+          Type *IncomingTy = (MIt != Replacements.end()) ? MIt->second->getType()
+                                                         : Incoming->getType();
+          if (IncomingTy != NewTy) {
+            Compatible = false;
+            break;
+          }
+        }
+        if (!Compatible) {
+          Worklist.clear();
+          return false;
+        }
+
         // If we haven't created a replacement PHI yet, do so now.  Use the
         // replacement pointer type for the new PHI.
         PHINode *NewPhi = nullptr;
@@ -252,7 +286,7 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
           NewPhi = cast<PHINode>(It->second);
         } else {
           IRBuilder<> Builder(Phi);
-          NewPhi = Builder.CreatePHI(NewVal->getType(), Phi->getNumIncomingValues());
+          NewPhi = Builder.CreatePHI(NewTy, Phi->getNumIncomingValues());
           Replacements[Phi] = NewPhi;
           Worklist.push_back({Phi, NewPhi});
         }
