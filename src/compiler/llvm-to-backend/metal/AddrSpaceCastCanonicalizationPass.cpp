@@ -25,6 +25,7 @@
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Value.h>
+#include <llvm/IR/ValueHandle.h>
 
 using namespace llvm;
 
@@ -132,6 +133,15 @@ static bool canonicalizeConstantAddrSpaceCasts(Module &M) {
 /// not require an intermediate cast.  Chains of addrspacecast and bitcast
 /// instructions are collapsed.  Unsupported instructions will cause the cast
 /// to remain in place.
+///
+/// Design notes:
+///   - New replacement instructions are created eagerly (inserted into the IR)
+///     but replaceAllUsesWith is deferred until the entire walk succeeds.
+///     On bail-out the new instructions are unreferenced dead code (safe,
+///     cleaned up by later DCE) and the original instructions are untouched.
+///   - dropAllReferences is called on every instruction before eraseFromParent
+///     so that the erase order does not matter (avoids assert in debug builds
+///     when an instruction in ToErase is still referenced by another one).
 static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
   // Only remove downcasts (source AS is more specific than dest AS).
   // Upcasts (generic AS=0 → specific AS=N) were inserted by the address space
@@ -145,32 +155,42 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
 
   bool Changed = false;
   Value *Src = Cast->getOperand(0);
-  // Worklist of (old value, replacement value) pairs.  Using a vector
-  // implements a simple depth-first traversal.
+
+  // Worklist of (old value, replacement value) pairs.
   SmallVector<std::pair<Value *, Value *>, 8> Worklist;
   Worklist.push_back({Cast, Src});
-  // Map from original values to their replacements.  This avoids recreating
-  // instructions multiple times when they are used by several casts.
+
+  // Map from original values to their replacements.
   DenseMap<Value *, Value *> Replacements;
   Replacements[Cast] = Src;
-  // Collect instructions to remove once rewriting has finished.
+
+  // Instructions to erase after all replacements are wired up.
   SmallVector<Instruction *, 16> ToErase;
 
-  // Process the worklist.  Each entry consists of an old SSA value and the
-  // replacement value that should be used in its stead.
+  // Deferred replaceAllUsesWith: applied only after the entire walk succeeds.
+  // This ensures that a bail-out on an unsupported use leaves the IR valid —
+  // new instructions exist but are unreferenced dead code; no original
+  // instruction has had its uses redirected to a partial replacement.
+  SmallVector<std::pair<Instruction *, Value *>, 16> DeferredReplace;
+
   while (!Worklist.empty()) {
-    auto [OldVal, NewVal] = Worklist.pop_back_val();
+    Value *OldVal = Worklist.back().first;
+    Value *NewVal = Worklist.back().second;
+    Worklist.pop_back();
     // Copy the user list since we may modify it during iteration.
     SmallVector<User *, 8> Users(OldVal->users().begin(), OldVal->users().end());
     for (User *U : Users) {
       // Do not attempt to rewrite constant expressions here.  They should be
       // handled separately by canonicalizeConstantAddrSpaceCasts().
-      if (auto *CE = dyn_cast<ConstantExpr>(U))
+      if (isa<ConstantExpr>(U))
+        continue;
+
+      // Skip users that are already in Replacements (visited via another path).
+      if (Replacements.count(U))
         continue;
 
       if (auto *NextCast = dyn_cast<AddrSpaceCastInst>(U)) {
-        // Collapse chains of addrspacecasts.  Simply propagate the source value
-        // forward and mark the cast for removal.
+        // Collapse chains of addrspacecasts: propagate the source value forward.
         Replacements[NextCast] = NewVal;
         Worklist.push_back({NextCast, NewVal});
         ToErase.push_back(NextCast);
@@ -179,20 +199,17 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
       }
 
       if (auto *BC = dyn_cast<BitCastInst>(U)) {
-        // Replace bitcasts by casting the replacement value to the desired type.
         IRBuilder<> Builder(BC);
         Value *NewBC = Builder.CreateBitCast(NewVal, BC->getType());
         Replacements[BC] = NewBC;
         Worklist.push_back({BC, NewBC});
-        BC->replaceAllUsesWith(NewBC);
+        DeferredReplace.push_back({BC, NewBC});
         ToErase.push_back(BC);
         Changed = true;
         continue;
       }
 
       if (auto *GEP = dyn_cast<GetElementPtrInst>(U)) {
-        // Recreate the GEP with the new base pointer.  Use the original element
-        // type from the GEP as the pointee type.  Preserve inbounds if set.
         IRBuilder<> Builder(GEP);
         SmallVector<Value *, 8> Indices;
         Indices.reserve(GEP->getNumIndices());
@@ -202,15 +219,13 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
             GEP->getSourceElementType(), NewVal, Indices, "", GEP->isInBounds());
         Replacements[GEP] = NewGEP;
         Worklist.push_back({GEP, NewGEP});
-        GEP->replaceAllUsesWith(NewGEP);
+        DeferredReplace.push_back({GEP, NewGEP});
         ToErase.push_back(GEP);
         Changed = true;
         continue;
       }
 
       if (auto *LI = dyn_cast<LoadInst>(U)) {
-        // Recreate the load using the new pointer.  Copy alignment, ordering
-        // and volatility from the original instruction.
         IRBuilder<> Builder(LI);
         auto *Ty = LI->getType();
         LoadInst *NewLoad = Builder.CreateLoad(Ty, NewVal);
@@ -218,13 +233,12 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
         NewLoad->setOrdering(LI->getOrdering());
         NewLoad->setSyncScopeID(LI->getSyncScopeID());
         NewLoad->setVolatile(LI->isVolatile());
-        // Copy debug location and metadata.
         NewLoad->setDebugLoc(LI->getDebugLoc());
         SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
         LI->getAllMetadata(MDs);
         for (auto &MD : MDs)
           NewLoad->setMetadata(MD.first, MD.second);
-        LI->replaceAllUsesWith(NewLoad);
+        DeferredReplace.push_back({LI, NewLoad});
         ToErase.push_back(LI);
         Changed = true;
         continue;
@@ -259,12 +273,13 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
         // (i.e. has the same address space as NewVal).  If any unreplaced
         // incoming has a different address space, promoting this PHI would
         // produce invalid IR — bail out instead.
+        // On bail-out DeferredReplace has not been applied yet, so IR is valid.
         Type *NewTy = NewVal->getType();
         bool Compatible = true;
         for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
           Value *Incoming = Phi->getIncomingValue(i);
           if (Incoming == OldVal)
-            continue; // this slot is being replaced
+            continue;
           auto MIt = Replacements.find(Incoming);
           Type *IncomingTy = (MIt != Replacements.end()) ? MIt->second->getType()
                                                          : Incoming->getType();
@@ -278,8 +293,6 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
           return false;
         }
 
-        // If we haven't created a replacement PHI yet, do so now.  Use the
-        // replacement pointer type for the new PHI.
         PHINode *NewPhi = nullptr;
         auto It = Replacements.find(Phi);
         if (It != Replacements.end()) {
@@ -289,9 +302,9 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
           NewPhi = Builder.CreatePHI(NewTy, Phi->getNumIncomingValues());
           Replacements[Phi] = NewPhi;
           Worklist.push_back({Phi, NewPhi});
+          DeferredReplace.push_back({Phi, NewPhi});
+          ToErase.push_back(Phi);
         }
-        // Populate the incoming values for the new PHI.  Use the rewritten
-        // values where available.
         for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
           Value *Incoming = Phi->getIncomingValue(i);
           BasicBlock *BB = Phi->getIncomingBlock(i);
@@ -303,18 +316,13 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
             Mapped = MIt->second;
           NewPhi->addIncoming(Mapped, BB);
         }
-        Phi->replaceAllUsesWith(NewPhi);
-        ToErase.push_back(Phi);
         Changed = true;
         continue;
       }
 
       if (auto *Sel = dyn_cast<SelectInst>(U)) {
-        // Create a new select instruction with updated operands.
         IRBuilder<> Builder(Sel);
         Value *Cond = Sel->getCondition();
-        Value *TrueVal = Sel->getTrueValue();
-        Value *FalseVal = Sel->getFalseValue();
         auto MapOp = [&](Value *Op) -> Value * {
           if (Op == OldVal)
             return NewVal;
@@ -323,26 +331,33 @@ static bool rewriteAddrSpaceCastUses(AddrSpaceCastInst *Cast) {
             return It->second;
           return Op;
         };
-        Value *NewTrue = MapOp(TrueVal);
-        Value *NewFalse = MapOp(FalseVal);
-        Value *NewSel = Builder.CreateSelect(Cond, NewTrue, NewFalse);
+        Value *NewSel = Builder.CreateSelect(Cond, MapOp(Sel->getTrueValue()),
+                                             MapOp(Sel->getFalseValue()));
         Replacements[Sel] = NewSel;
         Worklist.push_back({Sel, NewSel});
-        Sel->replaceAllUsesWith(NewSel);
+        DeferredReplace.push_back({Sel, NewSel});
         ToErase.push_back(Sel);
         Changed = true;
         continue;
       }
 
-      // If we encounter an unsupported use, bail out by clearing the worklist
-      // and cancel rewriting for this cast.  Leave the original cast in place.
-      // This prevents generation of invalid IR in cases we don't handle.
+      // Unsupported use — bail out without having wired up any replacements
+      // (DeferredReplace not applied yet, so the IR remains valid).
       Worklist.clear();
       return false;
     }
   }
 
-  // Remove all old instructions that were replaced.
+  // Wire up replacements now that we know every use can be handled.
+  for (auto &[OldInst, NewInst] : DeferredReplace)
+    OldInst->replaceAllUsesWith(NewInst);
+
+  // Drop all operand references before erasing so that the erase order does
+  // not matter.  Without this, erasing instruction A while instruction B
+  // (also in ToErase) still holds A as an operand trips a debug-build assert
+  // inside ~Value() that checks use_empty().
+  for (Instruction *I : ToErase)
+    I->dropAllReferences();
   for (Instruction *I : ToErase)
     I->eraseFromParent();
 
@@ -357,21 +372,27 @@ AddrSpaceCastCanonicalizationPass::run(Module &M, ModuleAnalysisManager &MAM) {
   // First canonicalize constant expression addrspacecasts on globals.
   Changed |= canonicalizeConstantAddrSpaceCasts(M);
 
-  // Next canonicalize addrspacecast instructions on SSA values.  Iterate over
-  // the module to find all such instructions.  We collect them in a vector
-  // first since rewriting modifies the instruction list.
-  SmallVector<AddrSpaceCastInst *, 16> Casts;
+  // Next canonicalize addrspacecast instructions on SSA values.  Collect them
+  // into WeakTrackingVH handles first, because rewriteAddrSpaceCastUses may
+  // erase intermediate casts in a chain (e.g. A→B→GEP: processing A erases B).
+  // A raw pointer to B would become dangling; WeakTrackingVH becomes null when
+  // the tracked instruction is deleted, allowing the loop to skip it safely.
+  SmallVector<WeakTrackingVH, 16> Casts;
   for (Function &F : M) {
     for (BasicBlock &BB : F) {
       for (Instruction &I : BB) {
-        if (auto *Cast = dyn_cast<AddrSpaceCastInst>(&I)) {
-          Casts.push_back(Cast);
-        }
+        if (isa<AddrSpaceCastInst>(&I))
+          Casts.push_back(&I);
       }
     }
   }
 
-  for (AddrSpaceCastInst *Cast : Casts) {
+  for (WeakTrackingVH VH : Casts) {
+    // VH becomes null when the instruction was erased by a prior iteration
+    // (e.g. as part of collapsing an addrspacecast chain).
+    if (!VH)
+      continue;
+    auto *Cast = cast<AddrSpaceCastInst>(VH.operator Value *());
     // Skip casts of constant values; these are handled separately.
     if (isa<Constant>(Cast->getOperand(0)))
       continue;

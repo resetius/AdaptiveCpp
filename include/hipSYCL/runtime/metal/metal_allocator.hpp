@@ -83,8 +83,8 @@ private:
   // and kept constant for all subsequent allocations via the retry mechanism in
   // alloc_from_region: when a new buffer's delta differs, release it (Metal
   // reuses its GPU VA slot) and retry at corrected_cpu = observed_gpu - delta.
-  mutable int64_t  _usm_delta        = 0;
-  mutable bool     _usm_delta_valid  = false;
+  int64_t  _usm_delta        = 0;
+  bool     _usm_delta_valid  = false;
 
   struct usm_block {
     MTL::Buffer*   buffer;

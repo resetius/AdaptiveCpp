@@ -15,6 +15,7 @@
 #include <Metal/Metal.hpp>
 
 #include <sys/sysctl.h> // sysctlbyname (hw.memsize)
+#include <unistd.h>    // getpagesize()
 
 namespace hipsycl {
 namespace rt {
@@ -32,8 +33,14 @@ static std::size_t get_total_ram() {
   return 8ULL << 30; // fallback: 8 GiB
 }
 
-// Page size used for USM alignment (Metal requires page-aligned noCopy buffers).
-static constexpr std::size_t kPageSize = 4096;
+// Page size for USM alignment.  Metal's newBufferWithBytesNoCopy requires the
+// pointer and length to be aligned to the system page size.  On Apple Silicon
+// (arm64 macOS) getpagesize() returns 16384; on x86_64 macOS it returns 4096.
+// Using the runtime value avoids silent size mismatches.
+static std::size_t get_page_size() {
+  static const std::size_t kPageSize = static_cast<std::size_t>(::getpagesize());
+  return kPageSize;
+}
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -41,14 +48,14 @@ static constexpr std::size_t kPageSize = 4096;
 
 metal_allocator::metal_allocator(MTL::Device *device, const device_id &id)
     : _device{device}, _device_id{id} {
-  // Reserve half of physical RAM as the USM backing region.
-  // The region uses PROT_NONE initially; pages are committed on demand.
-  // The cursor starts from the middle of the region (Turner approach 2:
-  // https://tallendev.github.io/assets/papers/sc21.pdf).
+  // Reserve half of physical RAM as the USM backing region (PROT_READ|PROT_WRITE,
+  // demand-paged).  The cursor starts from the middle of the region so that
+  // Turner approach 2 corrected_cpu addresses have room in both directions.
+  // See: https://tallendev.github.io/assets/papers/sc21.pdf
   std::size_t region_size = get_total_ram() / 2;
   _region = std::make_unique<metal_mmap_region>(region_size);
-  //std::cerr << "[metal_allocator] region: " << (region_size >> 20)
-  //          << " MiB at " << _region->base() << "\n";
+  HIPSYCL_DEBUG_INFO << "metal_allocator: reserved " << (region_size >> 20)
+                     << " MiB USM region at " << _region->base() << "\n";
 }
 
 metal_allocator::~metal_allocator() {
@@ -64,21 +71,25 @@ metal_allocator::~metal_allocator() {
 // Shared/host USM allocation — backed by the mmap region.
 //
 // Procedure:
-//   1. Sub-allocate from _region aligned to gpu_page_size (Turner approach 2,
-//      https://tallendev.github.io/assets/papers/sc21.pdf): rounding both size
-//      and address to the GPU VA granularity makes CPU stride == GPU stride, so
-//      delta = gpuAddress - hostAddress is the same for every allocation.
+//   1. Sub-allocate from _region aligned to the system page size.
+//      Turner approach 2 (https://tallendev.github.io/assets/papers/sc21.pdf):
+//      rounding size and address to the system page size makes the CPU stride
+//      equal to the GPU VA stride, so delta = gpuAddress - hostAddress is the
+//      same for every allocation.
 //   2. Create a MTL::Buffer over the sub-range using newBufferWithBytesNoCopy.
 //      The deallocator block is a no-op: memory lifetime is managed by _region.
 //   3. Record the host pointer → {buffer, size, type} in _ptr_to_block.
-//      The global _usm_delta was already set in the constructor from the probe.
+//      _usm_delta is set on the first allocation and held constant by the retry
+//      mechanism.
 // ---------------------------------------------------------------------------
 
 void *metal_allocator::alloc_from_region(std::size_t size_bytes,
                                          unsigned long opts,
                                          usm_alloc_type type) {
-  // Round size up to kPageSize so Metal's noCopy path gets page-aligned ranges.
-  std::size_t size = ((size_bytes + kPageSize - 1) / kPageSize) * kPageSize;
+  const std::size_t page_size = get_page_size();
+  // Round size up to the system page size so Metal's noCopy path gets
+  // page-aligned ranges (required by newBufferWithBytesNoCopy).
+  std::size_t size = ((size_bytes + page_size - 1) / page_size) * page_size;
 
   // Grab _usm_delta / _usm_delta_valid under the lock once so we can use them
   // outside the lock (they are written at most once, before being read).
@@ -111,7 +122,7 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
   // -------------------------------------------------------------------------
 
   // Step 1: pick a candidate address from the region.
-  void *host_ptr = _region->alloc(size, kPageSize);
+  void *host_ptr = _region->alloc(size, page_size);
   if (!host_ptr)
     return nullptr;
 
@@ -132,18 +143,16 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
   uint64_t host_addr = reinterpret_cast<uint64_t>(host_ptr);
   int64_t  delta     = static_cast<int64_t>(gpu_addr - host_addr);
 
-  //std::cerr << "[alloc_from_region]"
-  //          << " host=0x" << std::hex << host_addr
-  //          << " gpu=0x"  << gpu_addr
-  //          << " delta=0x" << static_cast<uint64_t>(delta)
-  //          << std::dec << "\n";
-
-  // Step 2: retry on delta mismatch.
+  // Step 2: retry on delta mismatch (Turner approach 2).
   if (delta_valid && delta != expected_delta) {
     // Release the mismatched buffer so Metal reuses its GPU VA slot.
     buf->release();
     buf = nullptr;
-    _region->free(host_ptr, size);
+    // Do NOT return host_ptr to the region free-list: freed candidates would
+    // be recycled by subsequent alloc() calls, causing those allocations to
+    // land at the old candidate CPU address and get a new mismatched GPU VA.
+    // Instead, we simply abandon the candidate VA range (burn it).
+    // With several GiB of VA space available, this waste is negligible.
     host_ptr = nullptr;
 
     // corrected_cpu: the CPU address such that newBuffer will assign
@@ -151,10 +160,11 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
     auto corrected_cpu = static_cast<uintptr_t>(
         static_cast<int64_t>(gpu_addr) - expected_delta);
 
-    //std::cerr << "[alloc_from_region] delta mismatch — retrying at corrected"
-    //          << " cpu=0x" << std::hex << corrected_cpu
-    //          << " (expected delta=0x" << static_cast<uint64_t>(expected_delta)
-    //          << ")" << std::dec << "\n";
+    HIPSYCL_DEBUG_INFO << "metal_allocator: delta mismatch, retrying at "
+                       << "corrected cpu=0x" << std::hex << corrected_cpu
+                       << " (expected delta=0x"
+                       << static_cast<uint64_t>(expected_delta) << ")"
+                       << std::dec << "\n";
 
     void *corrected = _region->alloc_at(reinterpret_cast<void *>(corrected_cpu),
                                         size);
@@ -172,11 +182,16 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
     host_addr = reinterpret_cast<uint64_t>(host_ptr);
     delta     = static_cast<int64_t>(gpu_addr - host_addr);
 
-    //std::cerr << "[alloc_from_region] retry result:"
-    //          << " host=0x" << std::hex << host_addr
-    //          << " gpu=0x"  << gpu_addr
-    //          << " delta=0x" << static_cast<uint64_t>(delta)
-    //          << std::dec << "\n";
+    if (delta != expected_delta) {
+      // Turner approach 2 assumption violated: Metal did not reuse the
+      // just-freed GPU VA.  This allocation will have a wrong delta and
+      // pointer translation will be incorrect for it.
+      HIPSYCL_DEBUG_WARNING
+          << "metal_allocator: retry delta mismatch (got 0x" << std::hex
+          << static_cast<uint64_t>(delta) << ", expected 0x"
+          << static_cast<uint64_t>(expected_delta) << ") — pointer "
+          << "translation may be incorrect for this allocation\n" << std::dec;
+    }
   }
 
   std::lock_guard<std::mutex> lock{_mutex};
@@ -201,8 +216,10 @@ void *metal_allocator::raw_allocate(std::size_t min_alignment,
                                     std::size_t size_bytes,
                                     const allocation_hints &) {
   // Device-only (StorageModePrivate) allocations do not need CPU access and
-  // therefore cannot use the noCopy path.  Keep the original approach.
+  // therefore cannot use the noCopy path.
   auto *buf = _device->newBuffer(size_bytes, MTL::ResourceStorageModePrivate);
+  if (!buf)
+    return nullptr;
   void *gpu_ptr = reinterpret_cast<void *>(buf->gpuAddress());
   std::lock_guard<std::mutex> lock{_mutex};
   _ptr_to_block[gpu_ptr] = {buf, size_bytes, usm_alloc_type::device};
