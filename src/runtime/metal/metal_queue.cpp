@@ -38,6 +38,14 @@ inline unsigned align_up(unsigned x, unsigned a) {
   return (x + (a - 1)) & ~(a - 1);
 }
 
+// Allocate a temporary shared buffer through the allocator and wrap it in a
+// shared_ptr so that raw_free is called automatically when all copies of the
+// handle go out of scope (e.g. when a completion handler lambda is destroyed).
+static std::shared_ptr<void> alloc_temp(metal_allocator* alloc, std::size_t size) {
+  void* ptr = alloc->raw_allocate_optimized_host(0, size);
+  return {ptr, [alloc](void* p) { alloc->raw_free(p); }};
+}
+
 void encode_arguments(
   MTL::ComputeCommandEncoder* encoder,
   MTL::Device* device,
@@ -71,15 +79,17 @@ void encode_arguments_argbuffer(
   std::size_t* arg_sizes,
   std::size_t num_args,
   const std::vector<int>& is_pointer_arg,
-  std::vector<NS::SharedPtr<MTL::Buffer>>& buffers_out,
+  std::vector<std::shared_ptr<void>>& bufs_out,
   NS::UInteger buf_offset = 0
 ) {
   NS::SharedPtr<MTL::ArgumentEncoder> arg_enc = NS::TransferPtr(function->newArgumentEncoder(buf_offset));
 
   const size_t arg_len = arg_enc->encodedLength();
-  auto arg_buffer_out = buffers_out.emplace_back(NS::TransferPtr(device->newBuffer(arg_len, MTL::ResourceStorageModeShared)));
+  auto arg_cpu = alloc_temp(allocator, arg_len);
+  auto [arg_buf, arg_off, _arg_type] = allocator->get_usm_block(arg_cpu.get());
+  bufs_out.push_back(arg_cpu);
 
-  arg_enc->setArgumentBuffer(arg_buffer_out.get(), 0);
+  arg_enc->setArgumentBuffer(arg_buf, arg_off);
 
   for (std::size_t i = 0; i < num_args; ++i) {
     if (is_pointer_arg[i]) {
@@ -95,7 +105,7 @@ void encode_arguments_argbuffer(
     }
   }
 
-  encoder->setBuffer(arg_buffer_out.get(), 0, buf_offset);
+  encoder->setBuffer(arg_buf, arg_off, buf_offset);
 }
 
 result launch_kernel_from_library(
@@ -187,12 +197,12 @@ result launch_kernel_from_library(
   // the allocator instead of scanning kernel arguments.
   int64_t addr_diff = allocator->usm_delta();
   encoder->setBytes(&addr_diff, sizeof(int64_t), 1);
-  std::vector<NS::SharedPtr<MTL::Buffer>> buffers_out;
+  std::vector<std::shared_ptr<void>> arg_bufs;
   if (!arg_buffer_used) {
     encode_arguments(encoder, device, allocator, args, arg_sizes, num_args, is_pointer_arg, buf_offset);
   } else {
     encode_arguments_argbuffer(
-      encoder, device, allocator, function.get(), args, arg_sizes, num_args, is_pointer_arg, buffers_out, buf_offset);
+      encoder, device, allocator, function.get(), args, arg_sizes, num_args, is_pointer_arg, arg_bufs, buf_offset);
   }
 
   MTL::Size num_groups_size = MTL::Size::Make(
@@ -217,7 +227,9 @@ result launch_kernel_from_library(
 
   encoder->endEncoding();
 
-  command_buffer->addCompletedHandler([=](MTL::CommandBuffer* command_buffer) {
+  // arg_bufs is captured by value; shared_ptr destructors call raw_free
+  // automatically once the GPU completes and the handler is destroyed.
+  command_buffer->addCompletedHandler([=, arg_bufs = std::move(arg_bufs)](MTL::CommandBuffer* command_buffer) {
     if (NS::Error* err = command_buffer->error()) {
       std::string msg = "metal: Command buffer failed: ";
       if (err->localizedDescription()) {
@@ -225,7 +237,6 @@ result launch_kernel_from_library(
       }
       register_error(make_error(__acpp_here(), error_info{msg}));
     }
-
     HIPSYCL_DEBUG_INFO << "metal: Kernel '" << kernel_name
                       << "' executed successfully" << std::endl;
   });
@@ -427,14 +438,16 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
       error_info{"metal_queue: Failed to create command buffer for memcpy"});
   }
 
-  NS::SharedPtr<MTL::Buffer> temp_buffer;
+  std::shared_ptr<void> temp_cpu;
+  MTL::Buffer* temp_buffer = nullptr;
   if (!src_is_device || !dst_is_device) {
-    temp_buffer = NS::TransferPtr(
-      _device->newBuffer(num_bytes, MTL::ResourceStorageModeShared));
-    if (!temp_buffer) {
+    temp_cpu = alloc_temp(_allocator, num_bytes);
+    if (!temp_cpu) {
       return make_error(__acpp_here(),
         error_info{"metal_queue: Failed to allocate temporary buffer"});
     }
+    auto [tb, _toff, _ttype] = _allocator->get_usm_block(temp_cpu.get());
+    temp_buffer = tb;
   }
 
   MTL::Buffer* from;
@@ -455,7 +468,7 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
         error_info{"metal_queue: Failed to resolve source USM pointer"});
     }
   } else {
-    from = temp_buffer.get();
+    from = temp_buffer;
     auto do_h2d_copy = [=]() {
       for (std::size_t surface = 0; surface < transferred_range[0]; ++surface) {
         for (std::size_t row = 0; row < transferred_range[1]; ++row) {
@@ -464,7 +477,7 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
 
           const char* src_byte_ptr = (const char*)src_ptr +
             linear_index(src, src_allocation_shape) * src_element_size;
-          char* dst_byte_ptr = (char*)temp_buffer->contents() +
+          char* dst_byte_ptr = static_cast<char*>(temp_cpu.get()) +
             linear_index(dst, transferred_range) * src_element_size;
           memcpy(dst_byte_ptr, src_byte_ptr, transferred_range[2] * src_element_size);
         }
@@ -504,7 +517,7 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
     }
   } else {
     // destination staging buffer
-    to = temp_buffer.get();
+    to = temp_buffer;
     dst_staging_offset = {0,0,0};
     dst_staging_shape = transferred_range;
   }
@@ -562,7 +575,7 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
             id<3> src = dst_staging_offset; src[0] += surface; src[1] += row;
             id<3> dst = dest_offset; dst[0] += surface; dst[1] += row;
 
-            const char* src_byte_ptr = (const char*)temp_buffer->contents() +
+            const char* src_byte_ptr = static_cast<const char*>(temp_cpu.get()) +
               linear_index(src, dst_staging_shape) * dest_element_size;
             char* dst_byte_ptr = (char*)dst_ptr +
               linear_index(dst, dest_allocation_shape) * dest_element_size;
@@ -579,7 +592,9 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
       command_buffer->encodeSignalEvent(_shared_event, deferred_h2d_done_event);
       _pending_cpu_event = deferred_h2d_done_event;
     }
-    command_buffer->addCompletedHandler([](MTL::CommandBuffer* cb) {
+    // temp_cpu captured by value; shared_ptr destructor calls raw_free
+    // automatically when the handler is destroyed after GPU completion.
+    command_buffer->addCompletedHandler([=, temp_cpu = temp_cpu](MTL::CommandBuffer* cb) {
       if (NS::Error* err = cb->error()) {
         std::string msg = "metal_queue: Memcpy failed: ";
         if (err->localizedDescription()) msg += err->localizedDescription()->utf8String();

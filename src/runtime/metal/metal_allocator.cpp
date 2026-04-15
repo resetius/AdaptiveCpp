@@ -42,6 +42,16 @@ static std::size_t get_page_size() {
   return kPageSize;
 }
 
+// Metal advances its GPU VA cursor by round_up(sz + page, 2*page) for each
+// newBufferWithBytesNoCopy call — it always inserts at least one guard page
+// and aligns the stride to a 2-page boundary.  Advancing the CPU bump cursor
+// by the same stride keeps delta = gpuAddress - hostAddress constant across
+// allocations without any Turner retry.
+static std::size_t metal_gpu_stride(std::size_t sz, std::size_t page_size) {
+  const std::size_t two_pages = 2 * page_size;
+  return (sz + page_size + two_pages - 1) & ~(two_pages - 1);
+}
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -91,6 +101,11 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
   // page-aligned ranges (required by newBufferWithBytesNoCopy).
   std::size_t size = ((size_bytes + page_size - 1) / page_size) * page_size;
 
+  // CPU region stride mirrors Metal's GPU VA stride so that delta stays
+  // constant by construction. The guard pages are included in the region
+  // allocation and returned on free(), so they never fragment the free list.
+  std::size_t stride = metal_gpu_stride(size, page_size);
+
   // Grab _usm_delta / _usm_delta_valid under the lock once so we can use them
   // outside the lock (they are written at most once, before being read).
   int64_t  expected_delta = 0;
@@ -122,7 +137,9 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
   // -------------------------------------------------------------------------
 
   // Step 1: pick a candidate address from the region.
-  void *host_ptr = _region->alloc(size, page_size);
+  // Allocate stride bytes (not just size) so guard pages are owned by this
+  // block and never escape into the free list as loose fragments.
+  void *host_ptr = _region->alloc(stride, page_size);
   if (!host_ptr)
     return nullptr;
 
@@ -160,14 +177,16 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
     auto corrected_cpu = static_cast<uintptr_t>(
         static_cast<int64_t>(gpu_addr) - expected_delta);
 
-    HIPSYCL_DEBUG_INFO << "metal_allocator: delta mismatch, retrying at "
-                       << "corrected cpu=0x" << std::hex << corrected_cpu
-                       << " (expected delta=0x"
+    HIPSYCL_DEBUG_INFO << "metal_allocator: delta mismatch by "
+                       << (delta - expected_delta) / static_cast<int64_t>(page_size)
+                       << " pages, retrying at corrected cpu=0x" << std::hex
+                       << corrected_cpu << " (got delta=0x"
+                       << static_cast<uint64_t>(delta) << " expected=0x"
                        << static_cast<uint64_t>(expected_delta) << ")"
                        << std::dec << "\n";
 
     void *corrected = _region->alloc_at(reinterpret_cast<void *>(corrected_cpu),
-                                        size);
+                                        stride);
     if (!corrected)
       return nullptr;
 
@@ -204,7 +223,9 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
                        << " host=0x" << host_addr << std::dec << ")\n";
   }
 
-  _ptr_to_block[host_ptr] = {buf, size, type};
+  // Store stride (not size) so raw_free returns the full region extent
+  // including guard pages back to the free list.
+  _ptr_to_block[host_ptr] = {buf, stride, type};
   return host_ptr;
 }
 
