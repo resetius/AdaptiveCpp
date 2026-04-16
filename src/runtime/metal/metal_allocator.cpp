@@ -26,34 +26,16 @@ void* metal_allocator::raw_allocate(
   size_t min_alignment, size_t size_bytes,
   const allocation_hints &hints)
 {
-  auto storage_mode = MTL::ResourceStorageModePrivate;
-  auto buffer = _device->newBuffer(size_bytes, storage_mode);
-  void* gpu_ptr = reinterpret_cast<void*>(buffer->gpuAddress());
-  auto block = usm_block{
-    .buffer = buffer,
-    .size = size_bytes,
-    .alloc_type = usm_alloc_type::device
-  };
-  std::lock_guard<std::mutex> lock{_mutex};
-  _ptr_to_block[gpu_ptr] = block;
-  return gpu_ptr;
+  auto block = get_block(size_bytes, alloc_type::device);
+  return block.buffer ? reinterpret_cast<void*>(block.buffer->gpuAddress()) : nullptr;
 }
 
 void *metal_allocator::raw_allocate_usm(
   size_t size_bytes,
   const allocation_hints &hints)
 {
-  auto storage_mode = MTL::ResourceStorageModeShared;
-  auto buffer = _device->newBuffer(size_bytes, storage_mode);
-  void* host_ptr = buffer->contents();
-  auto block = usm_block{
-    .buffer = buffer,
-    .size = size_bytes,
-    .alloc_type = usm_alloc_type::shared
-  };
-  std::lock_guard<std::mutex> lock{_mutex};
-  _ptr_to_block[host_ptr] = block;
-  return host_ptr;
+  auto block = get_block(size_bytes, alloc_type::shared);
+  return block.buffer ? block.buffer->contents() : nullptr;
 }
 
 void *
@@ -61,17 +43,8 @@ metal_allocator::raw_allocate_optimized_host(
   size_t min_alignment, size_t size_bytes,
   const allocation_hints &hints)
 {
-  auto storage_mode = MTL::ResourceStorageModeShared;
-  auto buffer = _device->newBuffer(size_bytes, storage_mode);
-  void* host_ptr = buffer->contents();
-  auto block = usm_block{
-    .buffer = buffer,
-    .size = size_bytes,
-    .alloc_type = usm_alloc_type::host
-  };
-  std::lock_guard<std::mutex> lock{_mutex};
-  _ptr_to_block[host_ptr] = block;
-  return host_ptr;
+  auto block = get_block(size_bytes, alloc_type::host);
+  return block.buffer ? block.buffer->contents() : nullptr;
 }
 
 void metal_allocator::raw_free(void *mem)
@@ -105,16 +78,16 @@ result metal_allocator::query_pointer(
     return make_error(__acpp_here(),
       error_info{"metal_allocator: Null pointer queried"});
   }
-  auto [buffer, offset, alloc_type] = get_usm_block(ptr);
-  if (alloc_type == usm_alloc_type::undefined) {
+  auto block = get_block(ptr);
+  if (block.alloc_type == alloc_type::undefined) {
     return make_error(__acpp_here(),
       error_info{"metal_allocator: Pointer is unknown"});
   }
-  if (alloc_type == usm_alloc_type::host) {
+  if (block.alloc_type == alloc_type::host) {
     out.is_optimized_host = true;
     return make_success();
   }
-  if (alloc_type == usm_alloc_type::shared) {
+  if (block.alloc_type == alloc_type::shared) {
     out.is_usm = true;
     return make_success();
   }
@@ -133,24 +106,49 @@ device_id metal_allocator::get_device() const {
   return _device_id;
 }
 
-std::tuple<MTL::Buffer*, size_t, metal_allocator::usm_alloc_type> metal_allocator::get_usm_block(const void* ptr) const {
+metal_allocator::block metal_allocator::get_block(const void* ptr) const {
   std::lock_guard<std::mutex> lock{_mutex};
   if (_ptr_to_block.empty()) {
-    return {nullptr, 0, usm_alloc_type::undefined};
+    return {nullptr, 0, alloc_type::undefined};
   }
   auto it = _ptr_to_block.upper_bound(const_cast<void*>(ptr));
   if (it == _ptr_to_block.begin()) {
-    return {nullptr, 0, usm_alloc_type::undefined};
+    return {nullptr, 0, alloc_type::undefined};
   }
   --it;
-  const usm_block& block = it->second;
+  const raw_block& block = it->second;
   size_t offset = static_cast<const char*>(ptr) -
           static_cast<const char*>(it->first);
-  if (offset < block.size) {
-    return {block.buffer, offset, block.alloc_type};
+  if (offset < block.buffer->length()) {
+    return {block.buffer, offset, block.alloc_type, it};
   }
-  return {nullptr, 0, usm_alloc_type::undefined};
+  return {nullptr, 0, alloc_type::undefined, _ptr_to_block.end()};
 }
+
+metal_allocator::block metal_allocator::get_block(size_t bytes, alloc_type alloc_type) {
+  auto storage_mode = MTL::ResourceStorageModeShared;
+  if (alloc_type == alloc_type::device) {
+    storage_mode = MTL::ResourceStorageModePrivate;
+  }
+  auto buffer = _device->newBuffer(bytes, storage_mode);
+  void* ptr = alloc_type == alloc_type::device ? (char*)buffer->gpuAddress() : buffer->contents();
+  auto block = raw_block {
+    .buffer = buffer,
+    .alloc_type = alloc_type
+  };
+  std::lock_guard<std::mutex> lock{_mutex};
+  auto [position, _] = _ptr_to_block.emplace(ptr, block);
+  return {block.buffer, 0, alloc_type, position};
+}
+
+void metal_allocator::free_block(block block) {
+  if (block.buffer && block.position != _ptr_to_block.end() && block.offset == 0) {
+    block.buffer->release();
+    std::lock_guard<std::mutex> lock{_mutex};
+    _ptr_to_block.erase(block.position);
+  }
+}
+
 
 } // namespace rt
 } // namespace hipsycl
