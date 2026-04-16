@@ -440,14 +440,16 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
 
   std::shared_ptr<void> temp_cpu;
   MTL::Buffer* temp_buffer = nullptr;
+  size_t temp_offset = 0; // byte offset of temp slot within temp_buffer
   if (!src_is_device || !dst_is_device) {
     temp_cpu = alloc_temp(_allocator, num_bytes);
     if (!temp_cpu) {
       return make_error(__acpp_here(),
         error_info{"metal_queue: Failed to allocate temporary buffer"});
     }
-    auto [tb, _toff, _ttype] = _allocator->get_usm_block(temp_cpu.get());
+    auto [tb, toff, _ttype] = _allocator->get_usm_block(temp_cpu.get());
     temp_buffer = tb;
+    temp_offset = toff;
   }
 
   MTL::Buffer* from;
@@ -469,6 +471,7 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
     }
   } else {
     from = temp_buffer;
+    from_offset = temp_offset;
     auto do_h2d_copy = [=]() {
       for (std::size_t surface = 0; surface < transferred_range[0]; ++surface) {
         for (std::size_t row = 0; row < transferred_range[1]; ++row) {
@@ -518,6 +521,7 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
   } else {
     // destination staging buffer
     to = temp_buffer;
+    to_offset = temp_offset;
     dst_staging_offset = {0,0,0};
     dst_staging_shape = transferred_range;
   }

@@ -418,6 +418,7 @@ if (WITH_METAL_BACKEND)
     metal/metal_queue.cpp
     metal/metal_allocator.cpp
     metal/metal_mmap_region.cpp
+    metal/metal_slab_allocator.cpp
     metal/metal_code_object.cpp
     metal/metal_event.cpp)
 

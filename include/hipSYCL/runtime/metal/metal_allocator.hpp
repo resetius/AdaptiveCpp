@@ -14,6 +14,7 @@
 #include "../allocator.hpp"
 #include "../hints.hpp"
 #include "metal_mmap_region.hpp"
+#include "metal_slab_allocator.hpp"
 
 #include <map>
 #include <memory>
@@ -31,12 +32,9 @@ namespace rt {
 class metal_allocator : public backend_allocator
 {
 public:
-  enum class usm_alloc_type {
-    shared = 0,
-    device = 1,
-    host = 2,
-    undefined = 3
-  };
+  // usm_alloc_type is defined at namespace scope in metal_slab_allocator.hpp
+  // and aliased here for backward compatibility.
+  using usm_alloc_type = metal_usm_alloc_type;
 
   metal_allocator(MTL::Device* device, const device_id &id);
   ~metal_allocator();
@@ -63,6 +61,8 @@ public:
   virtual device_id get_device() const override;
 
   // Returns the Metal buffer and offset for a given USM pointer.
+  // Works for both regular allocations and slab slots: slab buffers are
+  // registered in _ptr_to_block and found via range-lookup automatically.
   std::tuple<MTL::Buffer*, size_t, usm_alloc_type> get_usm_block(const void* ptr) const;
 
   // GPU-to-host address delta for all shared/host USM allocations.
@@ -80,26 +80,36 @@ private:
   // Turner approach 2 (https://tallendev.github.io/assets/papers/sc21.pdf):
   //
   // delta = gpuAddress - hostAddress.  Set on the first shared/host allocation
-  // and kept constant for all subsequent allocations via the retry mechanism in
-  // alloc_from_region: when a new buffer's delta differs, release it (Metal
-  // reuses its GPU VA slot) and retry at corrected_cpu = observed_gpu - delta.
+  // and kept constant for all subsequent allocations via the retry mechanism.
   int64_t  _usm_delta        = 0;
   bool     _usm_delta_valid  = false;
 
   struct usm_block {
     MTL::Buffer*   buffer;
-    size_t         size;
+    size_t         size;       // bytes reserved in the mmap region (stride, not user size)
     usm_alloc_type alloc_type;
+    bool           is_slab = false; // true if this block is managed by _slab_alloc
   };
   std::map<void*, usm_block> _ptr_to_block;
   mutable std::mutex _mutex;
 
-  // Shared implementation for raw_allocate_usm and raw_allocate_optimized_host.
-  // opts is MTL::ResourceOptions (unsigned long); declared as unsigned long
-  // here to avoid pulling Metal headers into this header.
+  // Bitmap-only slab manager for small USM allocations.
+  // Slab Metal buffers are registered in _ptr_to_block with is_slab=true.
+  // All methods are called with _mutex held.
+  metal_slab_allocator _slab_alloc;
+
+  // Shared implementation for raw_allocate_usm and raw_allocate_optimized_host
+  // for large (non-slab) allocations.
+  // opts is MTL::ResourceOptions (unsigned long) to avoid Metal headers here.
   void *alloc_from_region(std::size_t size_bytes,
                           unsigned long opts,
                           usm_alloc_type type);
+
+  // Creates a slab Metal buffer, registers it in _ptr_to_block, and returns
+  // the first slot.  Used for small allocations.
+  void *alloc_from_slab(std::size_t size_bytes,
+                        unsigned long opts,
+                        usm_alloc_type type);
 };
 
 

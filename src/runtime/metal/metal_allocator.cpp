@@ -10,6 +10,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 #include "hipSYCL/runtime/metal/metal_allocator.hpp"
+#include "hipSYCL/runtime/metal/metal_slab_allocator.hpp"
 #include "hipSYCL/common/debug.hpp"
 
 #include <Metal/Metal.hpp>
@@ -78,102 +79,71 @@ metal_allocator::~metal_allocator() {
 }
 
 // ---------------------------------------------------------------------------
-// Shared/host USM allocation — backed by the mmap region.
+// Core buffer allocation helper — allocates one Metal buffer backed by the
+// mmap region, using Turner approach 2 to keep delta constant.
 //
-// Procedure:
-//   1. Sub-allocate from _region aligned to the system page size.
-//      Turner approach 2 (https://tallendev.github.io/assets/papers/sc21.pdf):
-//      rounding size and address to the system page size makes the CPU stride
-//      equal to the GPU VA stride, so delta = gpuAddress - hostAddress is the
-//      same for every allocation.
-//   2. Create a MTL::Buffer over the sub-range using newBufferWithBytesNoCopy.
-//      The deallocator block is a no-op: memory lifetime is managed by _region.
-//   3. Record the host pointer → {buffer, size, type} in _ptr_to_block.
-//      _usm_delta is set on the first allocation and held constant by the retry
-//      mechanism.
+// Returns {host_ptr, buf, stride} on success; {nullptr, nullptr, 0} on failure.
+// Registers nothing in _ptr_to_block — caller does that.
+// Called WITHOUT _mutex held.
 // ---------------------------------------------------------------------------
 
-void *metal_allocator::alloc_from_region(std::size_t size_bytes,
-                                         unsigned long opts,
-                                         usm_alloc_type type) {
+struct AllocResult {
+  void        *host_ptr;
+  MTL::Buffer *buf;
+  std::size_t  stride;
+};
+
+static AllocResult
+alloc_region_buffer(MTL::Device *device, metal_mmap_region *region,
+                    int64_t &usm_delta, bool &usm_delta_valid,
+                    std::mutex &mutex,
+                    std::size_t size_bytes, unsigned long opts) {
   const std::size_t page_size = get_page_size();
   // Round size up to the system page size so Metal's noCopy path gets
   // page-aligned ranges (required by newBufferWithBytesNoCopy).
   std::size_t size = ((size_bytes + page_size - 1) / page_size) * page_size;
 
   // CPU region stride mirrors Metal's GPU VA stride so that delta stays
-  // constant by construction. The guard pages are included in the region
-  // allocation and returned on free(), so they never fragment the free list.
+  // constant by construction.
   std::size_t stride = metal_gpu_stride(size, page_size);
 
-  // Grab _usm_delta / _usm_delta_valid under the lock once so we can use them
-  // outside the lock (they are written at most once, before being read).
-  int64_t  expected_delta = 0;
-  bool     delta_valid    = false;
+  // Snapshot delta under the lock.
+  int64_t expected_delta = 0;
+  bool    delta_valid    = false;
   {
-    std::lock_guard<std::mutex> lk{_mutex};
-    expected_delta = _usm_delta;
-    delta_valid    = _usm_delta_valid;
+    std::lock_guard<std::mutex> lk{mutex};
+    expected_delta = usm_delta;
+    delta_valid    = usm_delta_valid;
   }
 
-  // -------------------------------------------------------------------------
-  // Turner approach 2 (https://tallendev.github.io/assets/papers/sc21.pdf):
-  //
-  //   Each newBufferWithBytesNoCopy call advances Metal's internal GPU VA
-  //   cursor by an unpredictable stride (depends on Metal version, size,
-  //   alignment).  The delta (gpuAddress - hostAddress) therefore varies per
-  //   allocation.
-  //
-  //   Fix: after the first allocation establishes `_usm_delta`, every
-  //   subsequent allocation checks whether the new buffer's delta matches.
-  //   On mismatch:
-  //     1. Release the mismatched buffer — Metal immediately puts its GPU VA
-  //        back at the head of its free list.
-  //     2. Compute corrected_cpu = observed_gpu - _usm_delta.
-  //        Because Metal reuses the just-freed GPU VA for the very next
-  //        newBuffer call, creating a buffer at corrected_cpu will receive
-  //        observed_gpu and delta == _usm_delta exactly.
-  //     3. commit_at(corrected_cpu) and retry.
-  // -------------------------------------------------------------------------
-
   // Step 1: pick a candidate address from the region.
-  // Allocate stride bytes (not just size) so guard pages are owned by this
-  // block and never escape into the free list as loose fragments.
-  void *host_ptr = _region->alloc(stride, page_size);
+  void *host_ptr = region->alloc(stride, page_size);
   if (!host_ptr)
-    return nullptr;
+    return {nullptr, nullptr, 0};
 
-  // Empty deallocator: Metal must not free the mmap pages.
   auto make_buf = [&](void *ptr) -> MTL::Buffer * {
-    return _device->newBuffer(
+    return device->newBuffer(
         ptr, size, static_cast<MTL::ResourceOptions>(opts),
         ^(void *, NS::UInteger) { /* no-op: _region owns the memory */ });
   };
 
   MTL::Buffer *buf = make_buf(host_ptr);
   if (!buf) {
-    _region->free(host_ptr, size);
-    return nullptr;
+    region->free(host_ptr, stride);
+    return {nullptr, nullptr, 0};
   }
 
   uint64_t gpu_addr  = buf->gpuAddress();
   uint64_t host_addr = reinterpret_cast<uint64_t>(host_ptr);
   int64_t  delta     = static_cast<int64_t>(gpu_addr - host_addr);
 
-  // Step 2: retry on delta mismatch (Turner approach 2).
+  // Step 2: Turner approach 2 retry on delta mismatch.
   if (delta_valid && delta != expected_delta) {
-    // Release the mismatched buffer so Metal reuses its GPU VA slot.
     buf->release();
     buf = nullptr;
-    // Do NOT return host_ptr to the region free-list: freed candidates would
-    // be recycled by subsequent alloc() calls, causing those allocations to
-    // land at the old candidate CPU address and get a new mismatched GPU VA.
-    // Instead, we simply abandon the candidate VA range (burn it).
-    // With several GiB of VA space available, this waste is negligible.
+    // Burn the candidate VA range (do not return to free-list).
     host_ptr = nullptr;
 
-    // corrected_cpu: the CPU address such that newBuffer will assign
-    // observed_gpu (the just-freed VA) → delta == expected_delta.
     auto corrected_cpu = static_cast<uintptr_t>(
         static_cast<int64_t>(gpu_addr) - expected_delta);
 
@@ -185,16 +155,16 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
                        << static_cast<uint64_t>(expected_delta) << ")"
                        << std::dec << "\n";
 
-    void *corrected = _region->alloc_at(reinterpret_cast<void *>(corrected_cpu),
-                                        stride);
+    void *corrected = region->alloc_at(reinterpret_cast<void *>(corrected_cpu),
+                                       stride);
     if (!corrected)
-      return nullptr;
+      return {nullptr, nullptr, 0};
 
     host_ptr = corrected;
     buf      = make_buf(host_ptr);
     if (!buf) {
-      _region->free(host_ptr, size);
-      return nullptr;
+      region->free(host_ptr, stride);
+      return {nullptr, nullptr, 0};
     }
 
     gpu_addr  = buf->gpuAddress();
@@ -202,9 +172,6 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
     delta     = static_cast<int64_t>(gpu_addr - host_addr);
 
     if (delta != expected_delta) {
-      // Turner approach 2 assumption violated: Metal did not reuse the
-      // just-freed GPU VA.  This allocation will have a wrong delta and
-      // pointer translation will be incorrect for it.
       HIPSYCL_DEBUG_WARNING
           << "metal_allocator: retry delta mismatch (got 0x" << std::hex
           << static_cast<uint64_t>(delta) << ", expected 0x"
@@ -213,20 +180,80 @@ void *metal_allocator::alloc_from_region(std::size_t size_bytes,
     }
   }
 
-  std::lock_guard<std::mutex> lock{_mutex};
-
-  if (!_usm_delta_valid) {
-    _usm_delta       = delta;
-    _usm_delta_valid = true;
-    HIPSYCL_DEBUG_INFO << "metal_allocator: USM delta = " << delta
-                       << " (gpu=0x" << std::hex << gpu_addr
-                       << " host=0x" << host_addr << std::dec << ")\n";
+  // Record delta on first allocation.
+  {
+    std::lock_guard<std::mutex> lk{mutex};
+    if (!usm_delta_valid) {
+      usm_delta       = delta;
+      usm_delta_valid = true;
+      HIPSYCL_DEBUG_INFO << "metal_allocator: USM delta = " << delta
+                         << " (gpu=0x" << std::hex << gpu_addr
+                         << " host=0x" << host_addr << std::dec << ")\n";
+    }
   }
 
+  return {host_ptr, buf, stride};
+}
+
+// ---------------------------------------------------------------------------
+// alloc_from_region — large (non-slab) allocations
+// ---------------------------------------------------------------------------
+
+void *metal_allocator::alloc_from_region(std::size_t size_bytes,
+                                         unsigned long opts,
+                                         usm_alloc_type type) {
+  auto [host_ptr, buf, stride] =
+      alloc_region_buffer(_device, _region.get(), _usm_delta, _usm_delta_valid,
+                          _mutex, size_bytes, opts);
+  if (!host_ptr)
+    return nullptr;
+
+  std::lock_guard<std::mutex> lock{_mutex};
   // Store stride (not size) so raw_free returns the full region extent
   // including guard pages back to the free list.
-  _ptr_to_block[host_ptr] = {buf, stride, type};
+  _ptr_to_block[host_ptr] = {buf, stride, type, /*is_slab=*/false};
   return host_ptr;
+}
+
+// ---------------------------------------------------------------------------
+// alloc_from_slab — small allocations
+//
+// Tries to satisfy the request from an existing slab first.  If no slab has a
+// free slot of the right size class, allocates a new 1-MiB Metal buffer (with
+// Turner retry), registers it in _ptr_to_block with is_slab=true, calls
+// _slab_alloc.register_slab(), and then allocates the first slot.
+// ---------------------------------------------------------------------------
+
+void *metal_allocator::alloc_from_slab(std::size_t size_bytes,
+                                       unsigned long opts,
+                                       usm_alloc_type type) {
+  const std::size_t page_size = get_page_size();
+  const std::size_t sc        = _slab_alloc.size_class(size_bytes);
+
+  // Fast path: existing slab has a free slot of matching type.
+  {
+    std::lock_guard<std::mutex> lock{_mutex};
+    void *slot = _slab_alloc.try_alloc_slot(sc, type);
+    if (slot)
+      return slot;
+  }
+
+  // Slow path: allocate a new slab buffer (kSlabBytes).
+  auto [host_ptr, buf, stride] =
+      alloc_region_buffer(_device, _region.get(), _usm_delta, _usm_delta_valid,
+                          _mutex, metal_slab_allocator::kSlabBytes, opts);
+  if (!host_ptr)
+    return nullptr;
+
+  const std::size_t num_slots = metal_slab_allocator::kSlabBytes / sc;
+
+  std::lock_guard<std::mutex> lock{_mutex};
+  _ptr_to_block[host_ptr] = {buf, stride, type, /*is_slab=*/true};
+  _slab_alloc.register_slab(host_ptr, sc, num_slots, type);
+
+  void *slot = _slab_alloc.try_alloc_slot(sc, type);
+  // Must succeed: we just registered a fresh slab.
+  return slot;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,12 +270,15 @@ void *metal_allocator::raw_allocate(std::size_t min_alignment,
     return nullptr;
   void *gpu_ptr = reinterpret_cast<void *>(buf->gpuAddress());
   std::lock_guard<std::mutex> lock{_mutex};
-  _ptr_to_block[gpu_ptr] = {buf, size_bytes, usm_alloc_type::device};
+  _ptr_to_block[gpu_ptr] = {buf, size_bytes, usm_alloc_type::device, /*is_slab=*/false};
   return gpu_ptr;
 }
 
 void *metal_allocator::raw_allocate_usm(std::size_t size_bytes,
                                         const allocation_hints &) {
+  if (_slab_alloc.is_small(size_bytes, get_page_size()))
+    return alloc_from_slab(size_bytes, MTL::ResourceStorageModeShared,
+                           usm_alloc_type::shared);
   return alloc_from_region(size_bytes, MTL::ResourceStorageModeShared,
                            usm_alloc_type::shared);
 }
@@ -256,6 +286,9 @@ void *metal_allocator::raw_allocate_usm(std::size_t size_bytes,
 void *metal_allocator::raw_allocate_optimized_host(std::size_t,
                                                    std::size_t size_bytes,
                                                    const allocation_hints &) {
+  if (_slab_alloc.is_small(size_bytes, get_page_size()))
+    return alloc_from_slab(size_bytes, MTL::ResourceStorageModeShared,
+                           usm_alloc_type::host);
   return alloc_from_region(size_bytes, MTL::ResourceStorageModeShared,
                            usm_alloc_type::host);
 }
@@ -263,39 +296,76 @@ void *metal_allocator::raw_allocate_optimized_host(std::size_t,
 // ---------------------------------------------------------------------------
 // Free
 //
-// 1. Release the MTL::Buffer — drops the GPU-address mapping.
-//    Because the deallocator was a no-op, Metal does NOT touch the mmap pages.
-// 2. Return the mmap pages to the region free-list via region->free().
+// For slab slots:
+//   1. Range-lookup to find the slab block.
+//   2. free_slot() in the bitmap; if the slab is now empty, release the Metal
+//      buffer, return the mmap pages, remove the slab metadata.
+//
+// For regular blocks:
+//   1. Release the MTL::Buffer — drops GPU-address mapping.
+//   2. Return the mmap pages to the region free-list.
 // ---------------------------------------------------------------------------
 
 void metal_allocator::raw_free(void *mem) {
   if (!mem) return;
 
-  MTL::Buffer *buf  = nullptr;
-  std::size_t  size = 0;
+  MTL::Buffer *buf         = nullptr;
+  std::size_t  size        = 0;
   bool         from_region = false;
 
-  {
-    std::lock_guard<std::mutex> lock{_mutex};
-    auto it = _ptr_to_block.find(mem);
-    if (it == _ptr_to_block.end())
-      return;
+  std::lock_guard<std::mutex> lock{_mutex};
 
-    buf  = it->second.buffer;
-    size = it->second.size;
-    from_region = (it->second.alloc_type != usm_alloc_type::device);
+  // First try exact lookup (works for regular non-slab blocks).
+  auto exact_it = _ptr_to_block.find(mem);
+  if (exact_it != _ptr_to_block.end() && !exact_it->second.is_slab) {
+    buf         = exact_it->second.buffer;
+    size        = exact_it->second.size;
+    from_region = (exact_it->second.alloc_type != usm_alloc_type::device);
+    _ptr_to_block.erase(exact_it);
+    // Release outside the conditional below.
+  } else {
+    // Range-lookup for slab slots (or unknown pointer).
+    if (_ptr_to_block.empty())
+      return;
+    auto it = _ptr_to_block.upper_bound(mem);
+    if (it == _ptr_to_block.begin())
+      return;
+    --it;
+
+    usm_block &block    = it->second;
+    void      *slab_base = it->first;
+    std::size_t offset  =
+        static_cast<char *>(mem) - static_cast<char *>(slab_base);
+    if (offset >= block.size)
+      return; // pointer not in this block
+
+    if (!block.is_slab)
+      return; // should not happen (exact_it above would have matched)
+
+    bool empty = _slab_alloc.free_slot(mem, slab_base);
+    if (!empty)
+      return; // slab still has live slots
+
+    // Slab is now completely free — tear it down.
+    buf  = block.buffer;
+    size = block.size;
+    from_region = true;
+    mem  = slab_base; // return the slab base, not the slot address
+    _slab_alloc.remove_slab(slab_base);
     _ptr_to_block.erase(it);
   }
 
+  // Drop GPU mapping (mmap pages stay alive because deallocator was no-op).
   if (buf)
-    buf->release();       // drop GPU mapping (mmap pages stay alive)
+    buf->release();
 
+  // Return mmap pages to the free-list.
   if (from_region)
-    _region->free(mem, size); // return pages to free-list
+    _region->free(mem, size);
 }
 
 // ---------------------------------------------------------------------------
-// Remaining interface (unchanged)
+// Remaining interface
 // ---------------------------------------------------------------------------
 
 bool metal_allocator::is_usm_accessible_from(backend_descriptor b) const {
@@ -329,9 +399,13 @@ result metal_allocator::mem_advise(const void *, std::size_t, int) const {
 
 device_id metal_allocator::get_device() const { return _device_id; }
 
+// get_usm_block: pure range-lookup in _ptr_to_block.
+// Slab buffers are registered there with their full stride as block size,
+// so any slot address within a slab falls inside the block naturally.
 std::tuple<MTL::Buffer *, size_t, metal_allocator::usm_alloc_type>
 metal_allocator::get_usm_block(const void *ptr) const {
   std::lock_guard<std::mutex> lock{_mutex};
+
   if (_ptr_to_block.empty())
     return {nullptr, 0, usm_alloc_type::undefined};
 
