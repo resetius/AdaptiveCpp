@@ -15,6 +15,7 @@
 #include "../hints.hpp"
 
 #include <map>
+#include <unordered_set>
 
 namespace MTL {
 
@@ -81,6 +82,8 @@ private:
   bool has_value_ = false;
 };
 
+struct metal_slab_meta;
+
 class metal_allocator : public backend_allocator
 {
   struct raw_block;
@@ -127,7 +130,7 @@ public:
   // Returns the Metal buffer and offset for a given USM pointer
   block get_block(const void* ptr) const;
   // Returns buffer for temporary allocations used by metal_query
-  block get_block(size_t bytes, alloc_type alloc_type);
+  block get_block(size_t bytes, alloc_type alloc_type, bool allow_slab = true);
   void free_block(block block);
 
   struct block_deleter {
@@ -140,21 +143,37 @@ public:
 
   using owned_block = unique_resource<block, block_deleter>;
 
-  owned_block get_owned_block(size_t bytes, alloc_type alloc_type) {
-    auto b = get_block(bytes, alloc_type);
+  owned_block get_owned_block(size_t bytes, alloc_type alloc_type, bool allow_slab = true) {
+    auto b = get_block(bytes, alloc_type, allow_slab);
     return unique_resource<block, block_deleter>(b, block_deleter{this});
   }
 
 private:
+  storage_type::const_iterator allocate_block(size_t bytes, alloc_type alloc_type);
+
+  storage_type::const_iterator allocate_block_unlocked(size_t bytes, alloc_type alloc_type);
+  storage_type::const_iterator get_slab_unlocked(size_t slab_class, alloc_type alloc_type);
+  storage_type::const_iterator allocate_slab_unlocked(size_t slab_class, alloc_type alloc_type);
+  storage_type::const_iterator get_or_allocate_slab_unlocked(size_t slab_class, alloc_type alloc_type);
+
   MTL::Device* _device = nullptr;
   device_id _device_id;
+
+  mutable std::mutex _mutex;
 
   struct raw_block {
     MTL::Buffer* buffer;
     alloc_type alloc_type;
+    mutable std::unique_ptr<metal_slab_meta> slab_meta;
   };
   storage_type _ptr_to_block;
-  mutable std::mutex _mutex;
+  struct iterator_hash {
+    size_t operator()(const storage_type::const_iterator& it) const {
+      return std::hash<void*>()(it->first);
+    }
+  };
+  std::map<std::pair<size_t, alloc_type>, std::unordered_set<storage_type::const_iterator, iterator_hash>> _slab_blocks;
+  std::map<std::pair<size_t, alloc_type>, std::unordered_set<storage_type::const_iterator, iterator_hash>> _slab_full_blocks;
 };
 
 

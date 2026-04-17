@@ -76,7 +76,9 @@ metal_allocator::owned_block encode_arguments_argbuffer(
   NS::SharedPtr<MTL::ArgumentEncoder> arg_enc = NS::TransferPtr(function->newArgumentEncoder(buf_offset));
 
   const size_t arg_len = arg_enc->encodedLength();
-  auto temp_buffer = allocator->get_owned_block(arg_len, metal_allocator::alloc_type::shared);
+
+  // argument buffers must not alias with user/staging suballocations from the same MTLBuffer
+  auto temp_buffer = allocator->get_owned_block(arg_len, metal_allocator::alloc_type::shared, /*allow_slab=*/false);
 
   arg_enc->setArgumentBuffer(temp_buffer->buffer, temp_buffer->offset);
 
