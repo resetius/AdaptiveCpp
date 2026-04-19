@@ -43,7 +43,11 @@ inline unsigned align_up(unsigned x, unsigned a) {
 // handle go out of scope (e.g. when a completion handler lambda is destroyed).
 static std::shared_ptr<void> alloc_temp(metal_allocator* alloc, std::size_t size) {
   void* ptr = alloc->raw_allocate_optimized_host(0, size);
-  return {ptr, [alloc](void* p) { alloc->raw_free(p); }};
+  std::cerr << "alloc_temp: allocated " << size << " bytes at " << ptr << "\n";
+  return {ptr, [alloc](void* p) {
+    std::cerr << "alloc_temp: freeing temp buffer at " << p << "\n";
+    alloc->raw_free(p);
+  }};
 }
 
 void encode_arguments(
@@ -60,6 +64,10 @@ void encode_arguments(
     NS::UInteger buf_idx = i + buf_offset;
     if (is_pointer_arg[i]) {
       void* usm_ptr = *(void**)args[i];
+      if (!usm_ptr) {
+        encoder->setBuffer(nullptr, 0, buf_idx);
+        continue;
+      }
       auto [buffer, offset, _] = allocator->get_usm_block(usm_ptr);
       if (buffer) {
         encoder->setBuffer(buffer, offset, buf_idx);
@@ -94,6 +102,10 @@ void encode_arguments_argbuffer(
   for (std::size_t i = 0; i < num_args; ++i) {
     if (is_pointer_arg[i]) {
       void* usm_ptr = *(void**)args[i];
+      if (!usm_ptr) {
+        arg_enc->setBuffer(nullptr, 0, i);
+        continue;
+      }
       auto [buffer, offset, _] = allocator->get_usm_block(usm_ptr);
       if (buffer) {
         arg_enc->setBuffer(buffer, offset, i);

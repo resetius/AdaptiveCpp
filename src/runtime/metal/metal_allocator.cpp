@@ -122,9 +122,17 @@ alloc_region_buffer(MTL::Device *device, metal_mmap_region *region,
     return {nullptr, nullptr, 0};
 
   auto make_buf = [&](void *ptr) -> MTL::Buffer * {
-    return device->newBuffer(
+    auto buffer = device->newBuffer(
         ptr, size, static_cast<MTL::ResourceOptions>(opts),
-        ^(void *, NS::UInteger) { /* no-op: _region owns the memory */ });
+        ^(void *, NS::UInteger) {
+          std::cerr << "Releasing Metal buffer at " << ptr << "\n";
+          /* no-op: _region owns the memory */
+    });
+
+    std::cerr << "Allocated Metal buffer " << ptr << " (size=" << size << " stride=" << stride
+              << ") with GPU address 0x" << std::hex
+              << (buffer ? buffer->gpuAddress() : 0) << std::dec << "\n";
+    return buffer;
   };
 
   MTL::Buffer *buf = make_buf(host_ptr);
@@ -356,12 +364,16 @@ void metal_allocator::raw_free(void *mem) {
   }
 
   // Drop GPU mapping (mmap pages stay alive because deallocator was no-op).
-  if (buf)
+  if (buf) {
+    std::cerr << "Call Releasing Metal buffer at " << buf->contents() << "\n";
     buf->release();
+  }
 
   // Return mmap pages to the free-list.
-  if (from_region)
+  if (from_region) {
+     std::cerr << "Returning mmap pages to free-list at " << mem << " (size=" << size << ")\n";
     _region->free(mem, size);
+  }
 }
 
 // ---------------------------------------------------------------------------
