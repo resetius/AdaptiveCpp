@@ -18,6 +18,7 @@
 #include "hipSYCL/common/debug.hpp"
 
 #include <Metal/Metal.hpp>
+#include <iostream>
 #include <utility>
 
 #undef nil
@@ -86,6 +87,11 @@ metal_allocator::owned_block encode_arguments_argbuffer(
     if (is_pointer_arg[i]) {
       void* usm_ptr = *(void**)args[i];
       auto block = allocator->get_block(usm_ptr);
+      std::cerr << "[arg buffer] arg " << i << ": usm_ptr=" << usm_ptr
+                << " block_buffer=" << block.buffer
+                << " block_offset=" << block.offset
+                << " block_alloc_type=" << static_cast<int>(block.alloc_type)
+                << "\n";
       if (block.buffer) {
         arg_enc->setBuffer(block.buffer, block.offset, i);
         encoder->useResource(block.buffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
@@ -97,6 +103,9 @@ metal_allocator::owned_block encode_arguments_argbuffer(
   }
 
   encoder->setBuffer(temp_buffer->buffer, temp_buffer->offset, buf_offset);
+  std::cerr << "[queue] args buffer: contents=" << temp_buffer->buffer->contents()
+            << " offset=" << temp_buffer->offset
+            << " gpuAddr=" << reinterpret_cast<void*>(temp_buffer->buffer->gpuAddress()) << "\n";
   return temp_buffer;
 }
 
@@ -434,6 +443,10 @@ result metal_inorder_queue::submit_memcpy(memcpy_operation& op, const dag_node_p
       return make_error(__acpp_here(),
         error_info{"metal_queue: Failed to allocate temporary buffer"});
     }
+    std::cerr << "[queue] staging buffer: contents=" << temp_buffer->buffer->contents()
+              << " offset=" << temp_buffer->offset
+              << " gpuAddr=" << reinterpret_cast<void*>(temp_buffer->buffer->gpuAddress())
+              << " bytes=" << num_bytes << "\n";
   }
 
   MTL::Buffer* from;

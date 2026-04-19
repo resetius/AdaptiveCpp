@@ -83,6 +83,7 @@ private:
 };
 
 struct metal_slab_meta;
+struct metal_mmap_region;
 
 class metal_allocator : public backend_allocator
 {
@@ -164,6 +165,7 @@ private:
   struct raw_block {
     MTL::Buffer* buffer;
     alloc_type alloc_type;
+    size_t mmap_size = 0; // non-zero iff backed by _mmap_region
     mutable std::unique_ptr<metal_slab_meta> slab_meta;
   };
   storage_type _ptr_to_block;
@@ -174,9 +176,8 @@ private:
   };
   std::map<std::pair<size_t, alloc_type>, std::unordered_set<storage_type::const_iterator, iterator_hash>> _slab_blocks;
   std::map<std::pair<size_t, alloc_type>, std::unordered_set<storage_type::const_iterator, iterator_hash>> _slab_full_blocks;
+  std::unique_ptr<metal_mmap_region> _mmap_region;
 };
-
-
 
 } // namespace rt
 } // namespace hipsycl
