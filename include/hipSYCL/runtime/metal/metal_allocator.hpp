@@ -15,6 +15,7 @@
 #include "../hints.hpp"
 
 #include <map>
+#include <optional>
 #include <unordered_set>
 
 namespace MTL {
@@ -177,6 +178,7 @@ private:
   std::map<std::pair<size_t, alloc_type>, std::unordered_set<storage_type::const_iterator, iterator_hash>> _slab_blocks;
   std::map<std::pair<size_t, alloc_type>, std::unordered_set<storage_type::const_iterator, iterator_hash>> _slab_full_blocks;
   std::unique_ptr<metal_mmap_region> _mmap_region;
+  std::optional<size_t> _delta;
 };
 
 } // namespace rt

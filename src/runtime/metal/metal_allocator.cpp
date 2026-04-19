@@ -42,12 +42,13 @@ namespace {
 
 static constexpr std::array<size_t, 6> slab_classes = {1024, 1024*4, 1024*16, 1024*64, 1024*256, 1024*1024};
 static constexpr size_t slab_buffer_size = 1024 * 1024 * 64;
-static constexpr double mmap_region_size_fraction = 1.0;
+static constexpr double mmap_region_size_fraction = 10.0;
 
 struct metal_mmap_region {
   metal_mmap_region(size_t capacity, size_t alignment)
     : _mmap_size(capacity), _capacity(capacity), _alignment(alignment)
   {
+    std::cerr << "metal_mmap_region: requesting " << (capacity >> 30) << " GiB for USM allocations\n";
     void* ptr = mmap(nullptr, capacity, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
     if (ptr == MAP_FAILED) {
       throw std::runtime_error("metal_mmap_region: mmap failed");
@@ -56,6 +57,14 @@ struct metal_mmap_region {
     _base = static_cast<char*>(ptr);
     _current = reinterpret_cast<char*>(align_up(reinterpret_cast<uintptr_t>(_base), _alignment));
     _capacity = capacity - (_current - _base);
+    _base = _current;
+
+    _free_blocks.emplace(_current, _capacity / 2);
+    _current += _capacity / 2;
+
+    std::cerr << "metal_mmap_region: base=" << (void*)_base
+              << " _current=" << (void*)_current
+              << " end=" << (void*)(_base + _capacity) << "\n";
   }
 
   ~metal_mmap_region() {
@@ -70,6 +79,17 @@ struct metal_mmap_region {
       return nullptr;
     }
     size = align_up(size, _alignment);
+
+    static bool first_fit = false;
+    if (!first_fit) {
+      first_fit = true;
+      if (_current + size > _base + _capacity) {
+        return nullptr;
+      }
+      void* ptr = _current;
+      _current += size;
+      return ptr;
+    }
 
     for (auto it = _free_blocks.begin(); it != _free_blocks.end(); ++it) {
       if (it->second >= size) {
@@ -118,14 +138,21 @@ struct metal_mmap_region {
     // 2. check free blocks
     auto it = _free_blocks.upper_bound(addr);
     if (it == _free_blocks.begin()) {
+      std::cerr << "[alloc] alloc_at failed: addr=" << addr << " size=" << size
+                << " is before first free block\n";
       return nullptr;
     }
     --it;
     char* ptr = static_cast<char*>(it->first);
-    if (ptr + size <= static_cast<char*>(addr)) {
+    if (ptr + it->second <= static_cast<char*>(addr)) {
+      std::cerr << "[alloc] alloc_at failed: addr=" << addr << " size=" << size
+                << " does not fit in free block [" << static_cast<void*>(ptr)
+                << ", " << static_cast<void*>(ptr + it->second) << ")\n";
       return nullptr;
     }
-    if (size - (static_cast<char*>(addr) - ptr) > it->second) {
+    if (static_cast<char*>(addr) + size > ptr + it->second) {
+      std::cerr << "[alloc] alloc_at failed: addr=" << addr << " size=" << size
+                << " exceeds free block end " << static_cast<void*>(ptr + it->second) << "\n";
       return nullptr;
     }
     size_t remaining = (ptr + it->second) - (static_cast<char*>(addr) + size);
@@ -161,16 +188,6 @@ struct metal_mmap_region {
       if (static_cast<char*>(prev->first) + prev->second == it->first) {
         prev->second += it->second;
         _free_blocks.erase(it);
-      }
-    }
-
-    while (!_free_blocks.empty()) {
-      auto last = std::prev(_free_blocks.end());
-      if (static_cast<char*>(last->first) + last->second == _current) {
-        _current = static_cast<char*>(last->first);
-        _free_blocks.erase(last);
-      } else {
-        break;
       }
     }
   }
@@ -348,22 +365,54 @@ metal_allocator::storage_type::const_iterator metal_allocator::allocate_block_un
     if (!region_ptr) {
       return _ptr_to_block.end();
     }
-    buffer = _device->newBuffer(
-      region_ptr, aligned, MTL::ResourceStorageModeShared,
-      ^(void*, NS::UInteger) {
-        std::cerr << "[alloc] deallocator fired: region_ptr=" << region_ptr << " stride=" << stride << "\n";
-        std::lock_guard<std::mutex> lock{_mutex};
-        _mmap_region->free(region_ptr, stride);
-      });
+    auto make_buffer = [&](void* region_ptr, size_t size) {
+      std::cerr << "[alloc] creating buffer: region_ptr=" << region_ptr << " size=" << size << "\n";
+      return _device->newBuffer(
+        region_ptr, size, MTL::ResourceStorageModeShared,
+        ^(void* addr, NS::UInteger) {
+          std::cerr << "[alloc] deallocator fired: addr=" << addr << " stride=" << stride << "\n";
+          //std::lock_guard<std::mutex> lock{_mutex};
+          //_mmap_region->free(region_ptr, stride);
+        });
+    };
+    buffer = make_buffer(region_ptr, aligned);
     if (!buffer) {
       _mmap_region->free(region_ptr, stride);
       return _ptr_to_block.end();
     }
     mmap_size = stride;
     ptr = buffer->contents();
+    size_t delta = buffer->gpuAddress() - reinterpret_cast<uintptr_t>(ptr);
     std::cerr << "[alloc] new shared buffer: contents=" << ptr
               << " gpuAddr=" << reinterpret_cast<void*>(buffer->gpuAddress())
-              << " aligned=" << aligned << " stride=" << stride << "\n";
+              << " aligned=" << aligned << " stride=" << stride
+              << " delta=" << delta
+              << " stored_delta=" << (_delta ? std::to_string(*_delta) : "nullopt") << "\n";
+
+    if (!_delta) {
+      _delta = delta;
+    } else {
+      while (delta != *_delta) {
+        _mmap_region->free(ptr, stride);
+        void* corrected = reinterpret_cast<char*>(buffer->gpuAddress() - *_delta);
+        std::cerr << "[alloc] delta mismatch, retry at corrected_cpu=" << corrected << "\n";
+        buffer->release();
+        corrected = _mmap_region->alloc_at(corrected, stride);
+        if (!corrected) {
+          return _ptr_to_block.end();
+        }
+        buffer = make_buffer(corrected, aligned);
+        if (!buffer) {
+          _mmap_region->free(corrected, stride);
+          return _ptr_to_block.end();
+        }
+        ptr = buffer->contents();
+        delta = buffer->gpuAddress() - reinterpret_cast<uintptr_t>(ptr);
+        std::cerr << "[alloc] retry result: contents=" << ptr
+                  << " gpuAddr=" << reinterpret_cast<void*>(buffer->gpuAddress())
+                  << " delta=" << delta << "\n";
+      }
+    }
   }
 
   auto block = raw_block {
@@ -452,6 +501,13 @@ void metal_allocator::free_block(block block) {
     key = block.position->first;
     is_slab = (block.position->second.slab_meta != nullptr);
     mmap_sz = block.position->second.mmap_size;
+    auto release = [&]() {
+      if (mmap_sz > 0) {
+        _mmap_region->free(block.position->first, mmap_sz);
+      }
+      block.buffer->release();
+      _ptr_to_block.erase(block.position);
+    };
     if (block.position->second.slab_meta) {
       auto& slab_meta = block.position->second.slab_meta;
       if (slab_meta->is_full()) {
@@ -473,12 +529,10 @@ void metal_allocator::free_block(block block) {
             _slab_blocks.erase(slab_blocks_it);
           }
         }
-        buffer = block.buffer;
-        _ptr_to_block.erase(block.position);
+        release();
       }
     } else {
-      buffer = block.buffer;
-      _ptr_to_block.erase(block.position);
+      release();
     }
   }
   if (buffer) {
@@ -491,7 +545,7 @@ void metal_allocator::free_block(block block) {
     // when Metal's retain count hits 0 (after the GPU command completes) and
     // it tries to acquire _mutex to free the mmap region — so we must not hold
     // the lock here to avoid deadlock.
-    buffer->release();
+    // buffer->release();
   }
 }
 
