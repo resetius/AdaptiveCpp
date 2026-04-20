@@ -95,6 +95,8 @@ metal_allocator::owned_block encode_arguments_argbuffer(
       if (block.buffer) {
         arg_enc->setBuffer(block.buffer, block.offset, i);
         encoder->useResource(block.buffer, MTL::ResourceUsageRead | MTL::ResourceUsageWrite);
+      } else {
+        arg_enc->setBuffer(nullptr, 0, i);
       }
     } else {
       auto* dst = arg_enc->constantData(i);
