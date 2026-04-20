@@ -135,11 +135,21 @@ struct metal_mmap_region {
       return addr;
     }
 
+    auto info = [&]() {
+      std::cerr << "[alloc] _base " << (void*)_base << " _current " << (void*)_current
+                << " _capacity " << _capacity << "\n";
+      for (auto & [ptr, sz] : _free_blocks) {
+        std::cerr << "  free block: [" << (void*)ptr << ", " << (void*)(static_cast<char*>(ptr) + sz) << ") size=" << sz << "\n";
+      }
+    };
+
     // 2. check free blocks
     auto it = _free_blocks.upper_bound(addr);
     if (it == _free_blocks.begin()) {
       std::cerr << "[alloc] alloc_at failed: addr=" << addr << " size=" << size
                 << " is before first free block\n";
+      info();
+      std::abort();
       return nullptr;
     }
     --it;
@@ -148,11 +158,20 @@ struct metal_mmap_region {
       std::cerr << "[alloc] alloc_at failed: addr=" << addr << " size=" << size
                 << " does not fit in free block [" << static_cast<void*>(ptr)
                 << ", " << static_cast<void*>(ptr + it->second) << ")\n";
+      info();
+      std::abort();
       return nullptr;
+    }
+    // extend the block if needed to cover the allocated range, and split off any remaining tail
+    if (static_cast<char*>(addr) + size > ptr + it->second && ptr + it->second == _current) {
+      _current = static_cast<char*>(addr) + size;
+      it->second = _current - ptr;
     }
     if (static_cast<char*>(addr) + size > ptr + it->second) {
       std::cerr << "[alloc] alloc_at failed: addr=" << addr << " size=" << size
                 << " exceeds free block end " << static_cast<void*>(ptr + it->second) << "\n";
+      info();
+      std::abort();
       return nullptr;
     }
     size_t remaining = (ptr + it->second) - (static_cast<char*>(addr) + size);
@@ -245,7 +264,14 @@ metal_allocator::metal_allocator(MTL::Device* device, const device_id &id)
   : _device{device}, _device_id{id}, _mmap_region(std::make_unique<metal_mmap_region>(static_cast<size_t>(get_total_ram() * mmap_region_size_fraction), getpagesize()))
 {}
 
-metal_allocator::~metal_allocator() = default;
+metal_allocator::~metal_allocator() {
+  std::cerr << "metal_allocator: Destroying allocator, freeing all blocks\n";
+  for (auto& [ptr, block] : _ptr_to_block) {
+    if (block.buffer) {
+      block.buffer->release();
+    }
+  }
+}
 
 void* metal_allocator::raw_allocate(
   size_t min_alignment, size_t size_bytes,
