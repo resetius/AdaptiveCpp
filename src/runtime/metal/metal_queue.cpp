@@ -215,6 +215,7 @@ result launch_kernel_from_library(
 
   encoder->endEncoding();
 
+  auto kernel_name_str = std::string{kernel_name};
   command_buffer->addCompletedHandler([=](MTL::CommandBuffer* command_buffer) {
     if (NS::Error* err = command_buffer->error()) {
       std::string msg = "metal: Command buffer failed: ";
@@ -224,7 +225,7 @@ result launch_kernel_from_library(
       register_error(make_error(__acpp_here(), error_info{msg}));
     }
 
-    HIPSYCL_DEBUG_INFO << "metal: Kernel '" << kernel_name
+    HIPSYCL_DEBUG_INFO << "metal: Kernel '" << kernel_name_str
                       << "' executed successfully" << std::endl;
   });
 
