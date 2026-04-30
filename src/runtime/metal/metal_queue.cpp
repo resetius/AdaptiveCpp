@@ -18,6 +18,7 @@
 #include "hipSYCL/common/debug.hpp"
 
 #include <Metal/Metal.hpp>
+#include <iostream>
 #include <utility>
 
 #undef nil
@@ -851,6 +852,16 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
 }
 
 metal_inorder_queue::~metal_inorder_queue() {
+  uint64_t current_event = _event_counter.load();
+  uint64_t signaled_event = _shared_event ? _shared_event->signaledValue() : 0;
+  if (_pending_cpu_event || _pending_gpu_event || signaled_event < current_event) {
+    std::cerr << "metal_inorder_queue::~metal_inorder_queue: draining pending work"
+              << " event_counter=" << current_event
+              << " signaled=" << signaled_event
+              << " pending_cpu_event=" << _pending_cpu_event
+              << " pending_gpu_event=" << _pending_gpu_event
+              << "\n";
+  }
   wait();
   _event_listener->release();
   _shared_event->release();
