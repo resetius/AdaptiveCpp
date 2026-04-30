@@ -217,6 +217,8 @@ BOOST_AUTO_TEST_CASE(explicit_queue_dependencies) {
 
   BOOST_CHECK(evt4.get_wait_list().size() == 1);
   BOOST_CHECK(evt4.get_wait_list()[0] == evt3);
+
+  q.wait();
 }
 
 
