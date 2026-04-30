@@ -182,7 +182,7 @@ metal_allocator::metal_allocator(MTL::Device* device, const device_id &id)
   , _device_id{id}
   , _page_size{static_cast<size_t>(getpagesize())}
   , _delta{(size_t)-1}
-  , _mmap_region(std::make_shared<metal_mmap_region>(
+  , _mmap_region(std::make_unique<metal_mmap_region>(
       static_cast<size_t>(get_total_ram() * mmap_region_size_fraction), _page_size))
 {
   calibrate();
@@ -325,14 +325,13 @@ MTL::Buffer* metal_allocator::alloc_buffer(size_t size_bytes) {
       return nullptr;
     }
 
-    auto mmap_region = _mmap_region;
     buffer = _device->newBuffer(
       region_ptr, aligned, MTL::ResourceStorageModeShared,
       ^(void*, NS::UInteger) {
-        mmap_region->free(region_ptr, stride);
+        _mmap_region->free(region_ptr, stride);
       });
     if (!buffer) {
-      mmap_region->free(region_ptr, stride);
+      _mmap_region->free(region_ptr, stride);
       return nullptr;
     }
 
