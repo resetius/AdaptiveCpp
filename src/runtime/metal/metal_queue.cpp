@@ -851,6 +851,7 @@ result metal_inorder_queue::submit_sscp_kernel_from_code_object(hcf_object_id hc
 }
 
 metal_inorder_queue::~metal_inorder_queue() {
+  wait();
   _event_listener->release();
   _shared_event->release();
   _command_queue->release();
