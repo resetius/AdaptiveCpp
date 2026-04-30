@@ -79,6 +79,9 @@ private:
 
   struct usm_block {
     MTL::Buffer* buffer;
+    // The Metal buffer may be page-aligned and larger than the requested USM
+    // allocation. Keep the requested size for pointer range checks.
+    size_t size;
     usm_alloc_type alloc_type;
   };
   std::map<void*, usm_block> _ptr_to_block;

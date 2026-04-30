@@ -205,6 +205,7 @@ void* metal_allocator::raw_allocate(
   void* gpu_ptr = reinterpret_cast<void*>(buffer->gpuAddress());
   auto block = usm_block{
     .buffer = buffer,
+    .size = size_bytes,
     .alloc_type = usm_alloc_type::device
   };
   std::lock_guard<std::mutex> lock{_mutex};
@@ -223,6 +224,7 @@ void *metal_allocator::raw_allocate_usm(
   void* host_ptr = buffer->contents();
   auto block = usm_block{
     .buffer = buffer,
+    .size = size_bytes,
     .alloc_type = usm_alloc_type::shared,
   };
   std::lock_guard<std::mutex> lock{_mutex};
@@ -242,6 +244,7 @@ metal_allocator::raw_allocate_optimized_host(
   void* host_ptr = buffer->contents();
   auto block = usm_block{
     .buffer = buffer,
+    .size = size_bytes,
     .alloc_type = usm_alloc_type::host,
   };
   std::lock_guard<std::mutex> lock{_mutex};
@@ -378,7 +381,7 @@ std::tuple<MTL::Buffer*, size_t, metal_allocator::usm_alloc_type> metal_allocato
   const usm_block& block = it->second;
   size_t offset = static_cast<const char*>(ptr) -
           static_cast<const char*>(it->first);
-  if (offset < block.buffer->length()) {
+  if (offset < block.size) {
     return {block.buffer, offset, block.alloc_type};
   }
   return {nullptr, 0, usm_alloc_type::undefined};
