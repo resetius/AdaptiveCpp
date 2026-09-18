@@ -179,6 +179,7 @@ private:
   result flush();
 
   void profiling_setup(operation& op, const dag_node_ptr& node);
+  void host_profiling_setup(operation& op, const dag_node_ptr& node);
 
   MTL::Device* _device = nullptr;
   MTL::CommandQueue* _command_queue = nullptr;
@@ -221,7 +222,7 @@ private:
 
   kernel_configuration _config;
 
-  mutable std::recursive_mutex _mutex;
+  mutable std::mutex _mutex;
 
   std::optional<metal_profiling_setup> _profiling_setup;
 };
