@@ -1,5 +1,6 @@
-// TEMPORARY: compiles features.metal and creates a pipeline per kernel, so the
-// log says which construct the GPU backend compiler rejects.
+// TEMPORARY: compiles every .msl given on the command line and creates one
+// pipeline per kernel in it, so the log says which kernel the GPU backend
+// compiler rejects.
 #import <Metal/Metal.h>
 #include <stdio.h>
 
@@ -18,26 +19,25 @@ int main(int argc, char** argv) {
       printf("%s=%d ", families[i].name, [dev supportsFamily:families[i].family]);
     printf("\n");
 
-    NSError* err = nil;
-    NSString* path = argc > 1 ? [NSString stringWithUTF8String:argv[1]] : @"features.metal";
-    NSString* src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
-    if (!src) { printf("cannot read %s\n", path.UTF8String); return 1; }
+    for (int a = 1; a < argc; ++a) {
+      NSString* path = [NSString stringWithUTF8String:argv[a]];
+      printf("\n=== %s\n", path.lastPathComponent.UTF8String);
+      NSError* err = nil;
+      NSString* src = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:&err];
+      if (!src) { printf("cannot read file\n"); continue; }
 
-    MTLCompileOptions* opts = [MTLCompileOptions new];
-    id<MTLLibrary> lib = [dev newLibraryWithSource:src options:opts error:&err];
-    if (!lib) { printf("library: FAILED: %s\n", err.description.UTF8String); return 1; }
-    printf("library: ok\n");
+      id<MTLLibrary> lib = [dev newLibraryWithSource:src options:[MTLCompileOptions new] error:&err];
+      if (!lib) { printf("library: FAILED: %s\n", err.description.UTF8String); continue; }
+      printf("library: ok, %lu function(s)\n", (unsigned long)lib.functionNames.count);
 
-    NSArray<NSString*>* names = @[@"plain", @"vote_mask", @"vote_ballot",
-                                 @"program_scope_pointer", @"lock_loop",
-                                 @"lock_loop_prog_scope"];
-    for (NSString* name in names) {
-      err = nil;
-      id<MTLFunction> fn = [lib newFunctionWithName:name];
-      if (!fn) { printf("%-22s no such function\n", name.UTF8String); continue; }
-      id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];
-      printf("%-22s %s\n", name.UTF8String,
-             pso ? "pipeline ok" : [NSString stringWithFormat:@"PIPELINE FAILED: %@", err].UTF8String);
+      for (NSString* name in lib.functionNames) {
+        err = nil;
+        id<MTLFunction> fn = [lib newFunctionWithName:name];
+        if (!fn || fn.functionType != MTLFunctionTypeKernel) continue;
+        id<MTLComputePipelineState> pso = [dev newComputePipelineStateWithFunction:fn error:&err];
+        printf("  %-40s %s\n", name.UTF8String,
+               pso ? "pipeline ok" : [NSString stringWithFormat:@"PIPELINE FAILED: %@", err].UTF8String);
+      }
     }
   }
   return 0;
