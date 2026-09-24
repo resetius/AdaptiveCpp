@@ -594,7 +594,9 @@ inline void atomic64_write(u64* ptr, u64 value) {
 template<class F>
 inline u64 atomic64_update(u64* ptr, __acpp_sscp_memory_scope scope, F f) {
   u32* lock = atomic64_lock_for(ptr);
-  u64 old = 0;
+  // volatile, so that the old value is not carried out of the loop in a
+  // register: the Metal backend of a paravirtual GPU cannot compile that.
+  volatile u64 old = 0;
   // Prevent loop peeling for finished lanes.
   volatile bool done = false;
   u64 active = atomic64_active_threads();
