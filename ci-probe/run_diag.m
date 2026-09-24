@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
     printf("device: %s\n", dev.name.UTF8String);
 
     const uint32_t n = argc > 1 ? (uint32_t)atoi(argv[1]) : 32;
+    const uint32_t group = argc > 2 ? (uint32_t)atoi(argv[2]) : (n < 256 ? n : 256);
     id<MTLBuffer> locks = [dev newBufferWithLength:8 options:MTLResourceStorageModeShared];
     id<MTLBuffer> counter = [dev newBufferWithLength:8 options:MTLResourceStorageModeShared];
     id<MTLBuffer> iters = [dev newBufferWithLength:n * 4 options:MTLResourceStorageModeShared];
@@ -38,10 +39,12 @@ int main(int argc, char** argv) {
       [enc setBuffer:locks offset:0 atIndex:0];
       [enc setBuffer:counter offset:0 atIndex:1];
       [enc setBuffer:iters offset:0 atIndex:2];
-      [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(n, 1, 1)];
+      [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(group, 1, 1)];
       [enc endEncoding];
+      NSDate* started = [NSDate date];
       [cb commit];
       [cb waitUntilCompleted];
+      double seconds = -[started timeIntervalSinceNow];
       if (cb.error) { printf("%-14s command buffer error: %s\n", name.UTF8String, cb.error.localizedDescription.UTF8String); continue; }
 
       if ([name isEqualToString:@"vote_report"]) {
@@ -52,8 +55,8 @@ int main(int argc, char** argv) {
         uint32_t* it = (uint32_t*)iters.contents;
         uint32_t max_it = 0, cap_hits = 0;
         for (uint32_t i = 0; i < n; ++i) { if (it[i] > max_it) max_it = it[i]; if (it[i] >= 4096) ++cap_hits; }
-        printf("%-14s counter=%u (expected %u) max iterations=%u cap hits=%u\n", name.UTF8String,
-               *(uint32_t*)counter.contents, n, max_it, cap_hits);
+        printf("%-14s n=%u group=%u counter=%u (expected %u) max iterations=%u cap hits=%u %.3f s\n",
+               name.UTF8String, n, group, *(uint32_t*)counter.contents, n, max_it, cap_hits, seconds);
       }
     }
   }

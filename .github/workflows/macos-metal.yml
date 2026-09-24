@@ -22,5 +22,6 @@ jobs:
       run: |
         cd ${GITHUB_WORKSPACE}/ci-probe
         clang -fobjc-arc -framework Metal -framework Foundation -O2 -o run_diag run_diag.m
-        ./run_diag 32
-        ./run_diag 64
+        ./run_diag 32 32
+        ./run_diag 256 256
+        ./run_diag 2048 256
