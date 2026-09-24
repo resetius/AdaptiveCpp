@@ -594,9 +594,10 @@ inline void atomic64_write(u64* ptr, u64 value) {
 template<class F>
 inline u64 atomic64_update(u64* ptr, __acpp_sscp_memory_scope scope, F f) {
   u32* lock = atomic64_lock_for(ptr);
-  // volatile, so that the old value is not carried out of the loop in a
-  // register: the Metal backend of a paravirtual GPU cannot compile that.
-  volatile u64 old = 0;
+  // The old value is kept in two 32-bit halves: some Metal devices fail to
+  // compile a kernel in which a 64-bit value lives across the voting loop.
+  u32 old_low = 0;
+  u32 old_high = 0;
   // Prevent loop peeling for finished lanes.
   volatile bool done = false;
   u64 active = atomic64_active_threads();
@@ -605,8 +606,10 @@ inline u64 atomic64_update(u64* ptr, __acpp_sscp_memory_scope scope, F f) {
     if (!done) {
       if (atomic64_try_lock(lock)) {
         __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
-        old = atomic64_read(ptr);
+        u64 old = atomic64_read(ptr);
         atomic64_write(ptr, f(old));
+        old_low = (u32)old;
+        old_high = (u32)(old >> 32);
         __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
         atomic64_unlock(lock);
         done = true;
@@ -614,7 +617,7 @@ inline u64 atomic64_update(u64* ptr, __acpp_sscp_memory_scope scope, F f) {
     }
     done_active = atomic64_ballot(done);
   }
-  return old;
+  return ((u64)old_high << 32) | (u64)old_low;
 }
 
 inline bool atomic64_compare_exchange(u64* ptr, u64* expected, u64 desired,
