@@ -22,7 +22,7 @@ jobs:
         clang -fobjc-arc -framework Metal -framework Foundation -O2 -o features features.m
         # one process per file: after a failure this GPU stops compiling
         # anything else in the same process
-        for f in gen_a64_add_used.msl gen_a64_load.msl gen_a64_exch.msl \
-                 w_volatile_a64_load.msl w_volatile_a64_exch.msl; do
+        for f in after_loop.metal gen_a64_add.msl gen_a64_add_then_store.msl \
+                 gen_a64_add_used.msl; do
           ./features $f
         done
