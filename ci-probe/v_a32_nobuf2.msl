@@ -1,0 +1,172 @@
+// capabilities:
+
+#include <metal_stdlib>
+using namespace metal;
+
+// These structs are used for void** dereferencing
+struct __struct_ptr_to_device {
+  device void* value;
+};
+
+struct __struct_ptr_to_threadgroup {
+  threadgroup void* value;
+};
+
+struct __struct_ptr_to_constant {
+  constant void* value;
+};
+
+struct __struct_ptr_to_thread {
+  thread void* value;
+};
+
+template<typename To, typename From>
+struct __atomic_pointer_type {};
+
+template<typename To>
+struct __atomic_pointer_type<To, device void*> {
+  using type = device atomic<To>*;
+};
+
+template<typename To>
+struct __atomic_pointer_type<To, threadgroup void*> {
+  using type = threadgroup atomic<To>*;
+};
+
+template<typename To>
+struct __atomic_pointer_type<To, thread void*> {
+  using type = thread atomic<To>*;
+};
+
+template<typename To, typename From>
+inline typename __atomic_pointer_type<To, From>::type __atomic_pointer_cast(From ptr) {
+  return (typename __atomic_pointer_type<To, From>::type)(ptr);
+}
+
+template<typename To, typename From>
+struct __pointer_type {};
+
+template<typename To>
+struct __pointer_type<To, device void*> {
+  using type = device To*;
+};
+
+template<typename To>
+struct __pointer_type<To, threadgroup void*> {
+  using type = threadgroup To*;
+};
+
+template<typename To>
+struct __pointer_type<To, thread void*> {
+  using type = thread To*;
+};
+
+template<typename To, typename From>
+inline typename __pointer_type<To, From>::type __pointer_cast(From ptr) {
+  return (typename __pointer_type<To, From>::type)(ptr);
+}
+
+uint __simd_size [[threads_per_simdgroup]];
+uint __simd_group_id [[simdgroup_index_in_threadgroup]];
+uint __simd_lane_id [[thread_index_in_simdgroup]];
+
+uint3 __acpp_sscp_metal_group_id [[threadgroup_position_in_grid]];
+uint3 __acpp_sscp_metal_num_groups [[threadgroups_per_grid]];
+uint3 __acpp_sscp_metal_local_id [[thread_position_in_threadgroup]];
+uint3 __acpp_sscp_metal_local_size [[threads_per_threadgroup]];
+
+threadgroup void * constant __acpp_sscp_metal_dynamic_local_memory [[threadgroup(0)]];
+constant uint& constant __acpp_sscp_metal_dynamic_local_memory_size [[buffer(0)]];
+constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
+
+
+  inline char __as_signed(uchar value) {
+    return as_type<char>(value);
+  }
+
+  inline short __as_signed(ushort value) {
+    return as_type<short>(value);
+  }
+
+  inline int __as_signed(uint value) {
+    return as_type<int>(value);
+  }
+
+  inline long __as_signed(ulong value) {
+    return as_type<long>(value);
+  }
+
+  // LLVM sext i1 true to iN yields all-ones (-1), so replicate that semantic
+  inline int __as_signed(bool value) {
+    return value ? -1 : 0;
+  }
+
+struct i48u {
+  packed_ushort3 w;
+  i48u() : w(packed_ushort3(0,0,0)) {}
+  explicit i48u(packed_ushort3 ww) : w(ww) {}
+  explicit i48u(ushort x) : w(packed_ushort3(x, 0, 0)) {}
+  explicit i48u(uint x)
+  : w(packed_ushort3((ushort)(x & 0xffffu),
+                     (ushort)((x >> 16) & 0xffffu),
+                     0))
+  {}
+  explicit i48u(ulong x)
+  : w(packed_ushort3((ushort)(x & 0xfffful),
+                     (ushort)((x >> 16) & 0xfffful),
+                     (ushort)((x >> 32) & 0xfffful)))
+  {}
+
+  friend inline i48u operator|(i48u a, i48u b) {
+    return i48u(packed_ushort3((ushort)(a.w[0] | b.w[0]),
+                               (ushort)(a.w[1] | b.w[1]),
+                               (ushort)(a.w[2] | b.w[2])));
+  }
+
+  friend inline i48u operator<<(i48u a, uint bits) {
+    uint s = bits >> 4; // /16
+    if ((bits & 0xFu) != 0) {
+      ulong x = a.to_ulong();
+      x = (x << bits) & 0x0000FFFFFFFFFFFFul;
+      return i48u(x);
+    }
+    if (s == 0) return a;
+    if (s == 1) return i48u(packed_ushort3(0, a.w[0], a.w[1]));
+    if (s == 2) return i48u(packed_ushort3(0, 0, a.w[0]));
+    return i48u(); // >=48 => 0
+  }
+
+  friend inline i48u operator>>(i48u a, uint bits) {
+    uint s = bits >> 4; // /16
+    if ((bits & 0xFu) != 0) {
+      ulong x = a.to_ulong();
+      x = (x >> bits);
+      return i48u(x);
+    }
+    if (s == 0) return a;
+    if (s == 1) return i48u(packed_ushort3(a.w[1], a.w[2], 0));
+    if (s == 2) return i48u(packed_ushort3(a.w[2], 0, 0));
+    return i48u(); // >=48 => 0
+  }
+
+  inline ulong to_ulong() const {
+    return (ulong)w[0] | ((ulong)w[1] << 16) | ((ulong)w[2] << 32);
+  }
+};
+
+constexpr constant uchar t__str_14[84] = {0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x66u, 0x65u, 0x74u, 0x63u, 0x68u, 0x5fu, 0x61u, 0x64u, 0x64u, 0x5fu, 0x65u, 0x78u, 0x70u, 0x6cu, 0x69u, 0x63u, 0x69u, 0x74u, 0x28u, 0x5fu, 0x5fu, 0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x70u, 0x6fu, 0x69u, 0x6eu, 0x74u, 0x65u, 0x72u, 0x5fu, 0x63u, 0x61u, 0x73u, 0x74u, 0x3cu, 0x69u, 0x6eu, 0x74u, 0x3eu, 0x28u, 0x25u, 0x73u, 0x29u, 0x2cu, 0x20u, 0x25u, 0x73u, 0x2cu, 0x20u, 0x6du, 0x65u, 0x6du, 0x6fu, 0x72u, 0x79u, 0x5fu, 0x6fu, 0x72u, 0x64u, 0x65u, 0x72u, 0x5fu, 0x72u, 0x65u, 0x6cu, 0x61u, 0x78u, 0x65u, 0x64u, 0x29u, 0x0u};
+
+[[kernel]] void _Z18__acpp_sscp_kernelIN7hipsycl4glue15__sscp_dispatch11single_taskIZ4mainE3$_0EEEvRKT_ (device void* t0 [[buffer(3)]])
+{
+  // Locals
+
+  // Variables
+  device void* t2;
+  uint t3;
+
+  // block %1
+  t2 = t0; //   %2 = addrspacecast ptr addrspace(1) %0 to ptr
+  t3 = atomic_fetch_add_explicit(__atomic_pointer_cast<int>(t2), 0x1u, memory_order_relaxed);
+  return;
+}
+

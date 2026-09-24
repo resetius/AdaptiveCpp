@@ -20,4 +20,4 @@ jobs:
       run: |
         cd ${GITHUB_WORKSPACE}/ci-probe
         clang -fobjc-arc -framework Metal -framework Foundation -O2 -o features features.m
-        ./features features.metal atomic64_kernel.msl v_nofence.msl v_novote.msl v_noprogscope.msl v_nocas.msl gen_a32.msl gen_u64_plain.msl gen_a64_add.msl
+        ./features prologue_with_buf2.metal prologue_without_buf2.metal gen_a32.msl v_a32_nobuf2.msl atomic64_kernel.msl
