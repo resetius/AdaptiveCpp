@@ -147,6 +147,11 @@ result launch_kernel_from_library(
       error_msg += ": ";
       error_msg += error->localizedDescription()->utf8String();
     }
+    // TEMPORARY: the compiler log is only in the full error description
+    if (error && error->description()) {
+      error_msg += " | ";
+      error_msg += error->description()->utf8String();
+    }
     return make_error(__acpp_here(), error_info{error_msg});
   }
 

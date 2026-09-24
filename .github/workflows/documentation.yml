@@ -1,16 +1,8 @@
 name: Documentation
 
 on:
-  # Allows you to run this workflow manually from the Actions tab
+  # TEMPORARY: only the Metal workflow runs
   workflow_dispatch:
-
-  workflow_call:
-
-  pull_request:
-
-  push:
-    branches: [ "develop" ]
-
 
 jobs:
 
