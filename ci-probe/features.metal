@@ -64,3 +64,27 @@ kernel void lock_loop_prog_scope(device atomic_uint* counter [[buffer(1)]],
     done_active = (ulong)(simd_vote::vote_t)simd_ballot(done);
   }
 }
+
+// Suspects that are not specific to the lock: 64-bit arithmetic, a volatile
+// flag in thread memory, and the program scope attribute variables.
+kernel void ulong_arith(device ulong* out [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+  ulong x = out[tid];
+  out[tid] = (x << 13) ^ (x >> 7) ^ (x * 1099511628211ul);
+}
+
+kernel void ulong_halves(device atomic_uint* out [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+  uint low = atomic_load_explicit(&out[0], memory_order_relaxed);
+  uint high = atomic_load_explicit(&out[1], memory_order_relaxed);
+  ulong value = (((ulong)high << 32) | (ulong)low) + 1;
+  atomic_store_explicit(&out[0], (uint)value, memory_order_relaxed);
+  atomic_store_explicit(&out[1], (uint)(value >> 32), memory_order_relaxed);
+}
+
+kernel void thread_volatile_loop(device uint* out [[buffer(0)]], uint tid [[thread_position_in_grid]]) {
+  volatile bool done = false;
+  uint i = 0;
+  while (!done) {
+    if (++i > tid) done = true;
+  }
+  out[tid] = i;
+}
