@@ -68,6 +68,13 @@ jobs:
           ${GITHUB_WORKSPACE}/tests
         ninja
 
+    # TEMPORARY: which MSL construct does this GPU reject?
+    - name: probe Metal features
+      run: |
+        cd ${GITHUB_WORKSPACE}/ci-probe
+        clang -fobjc-arc -framework Metal -framework Foundation -O2 -o features features.m
+        ./features features.metal
+
     - name: run Metal tests (sycl)
       run: |
         cd ${GITHUB_WORKSPACE}/build/tests-sscp
