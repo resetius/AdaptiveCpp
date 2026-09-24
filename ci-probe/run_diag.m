@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
     id<MTLBuffer> counter = [dev newBufferWithLength:8 options:MTLResourceStorageModeShared];
     id<MTLBuffer> iters = [dev newBufferWithLength:n * 4 options:MTLResourceStorageModeShared];
 
-    NSArray<NSString*>* names = @[@"vote_report", @"loop_equal", @"loop_masked", @"loop_simd_all"];
+    NSArray<NSString*>* names = @[@"vote_report", @"loop_equal", @"loop_masked", @"loop_simd_all", @"loop_backoff", @"loop_aggregated"];
     for (NSString* name in names) {
       id<MTLComputePipelineState> pso =
         [dev newComputePipelineStateWithFunction:[lib newFunctionWithName:name] error:&err];

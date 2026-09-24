@@ -64,3 +64,59 @@ kernel void loop_simd_all(device atomic_uint* locks [[buffer(0)]], device atomic
                           device uint* iters [[buffer(2)]], uint tid [[thread_position_in_grid]]) {
   LOCK_BODY(simd_all(done))
 }
+
+// Against starvation: wait a little after a failed acquisition.
+kernel void loop_backoff(device atomic_uint* locks [[buffer(0)]], device atomic_uint* counter [[buffer(1)]],
+                         device uint* iters [[buffer(2)]], uint tid [[thread_position_in_grid]]) {
+  uint used = 0;
+  uint delay = 1;
+  volatile bool done = false;
+  ulong active = (ulong)(simd_vote::vote_t)simd_active_threads_mask();
+  ulong done_active = 0;
+  while (active != done_active && used < cap) {
+    ++used;
+    if (!done) {
+      uint expected = 0;
+      if (atomic_compare_exchange_weak_explicit(&locks[0], &expected, 1u,
+                                               memory_order_relaxed, memory_order_relaxed)) {
+        uint low = atomic_load_explicit(&counter[0], memory_order_relaxed);
+        atomic_store_explicit(&counter[0], low + 1, memory_order_relaxed);
+        atomic_store_explicit(&locks[0], 0u, memory_order_relaxed);
+        done = true;
+      } else {
+        for (uint i = 0; i < delay; ++i) {
+          atomic_load_explicit(&counter[1], memory_order_relaxed);
+        }
+        delay = delay < 256 ? delay * 2 : 256;
+      }
+    }
+    done_active = (ulong)(simd_vote::vote_t)simd_ballot(done);
+  }
+  iters[tid] = used;
+}
+
+// Against contention: one lane of the SIMD group takes the lock for everyone.
+kernel void loop_aggregated(device atomic_uint* locks [[buffer(0)]], device atomic_uint* counter [[buffer(1)]],
+                            device uint* iters [[buffer(2)]], uint tid [[thread_position_in_grid]],
+                            uint lane [[thread_index_in_simdgroup]]) {
+  uint used = 0;
+  ulong active = (ulong)(simd_vote::vote_t)simd_active_threads_mask();
+  uint lanes = popcount((uint)active);
+  bool leader = simd_is_first();
+  volatile bool done = false;
+  while (!done && used < cap) {
+    ++used;
+    if (leader) {
+      uint expected = 0;
+      if (atomic_compare_exchange_weak_explicit(&locks[0], &expected, 1u,
+                                               memory_order_relaxed, memory_order_relaxed)) {
+        uint low = atomic_load_explicit(&counter[0], memory_order_relaxed);
+        atomic_store_explicit(&counter[0], low + lanes, memory_order_relaxed);
+        atomic_store_explicit(&locks[0], 0u, memory_order_relaxed);
+        done = true;
+      }
+    }
+    done = simd_any(done);
+  }
+  iters[tid] = used;
+}
