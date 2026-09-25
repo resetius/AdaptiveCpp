@@ -142,7 +142,8 @@ result launch_kernel_from_library(
   NS::SharedPtr<MTL::ComputePipelineState> pipeline_state = NS::TransferPtr(device->newComputePipelineState(function.get(), &error));
 
   if (error || !pipeline_state) {
-    std::string error_msg = "metal: Failed to create compute pipeline state";
+    std::string error_msg = "metal: Failed to create compute pipeline state for kernel ";
+    error_msg += std::string(kernel_name);
     if (error && error->localizedDescription()) {
       error_msg += ": ";
       error_msg += error->localizedDescription()->utf8String();
