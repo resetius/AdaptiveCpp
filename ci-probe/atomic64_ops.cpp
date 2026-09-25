@@ -42,6 +42,29 @@ int main(int argc, char **argv) {
   if (what == "max")      return run<u64>(q, n, "max", 0, [](auto &r, u64 x) { r.fetch_max(x); }) ? 0 : 1;
   if (what == "cas")      return run<u64>(q, n, "cas", 0, [](auto &r, u64 x) { u64 e = 0; r.compare_exchange_strong(e, x); }) ? 0 : 1;
 
+  if (what == "min_i64")  return run<i64>(q, n, "min_i64", (i64)1 << 40, [](auto &r, i64 x) { r.fetch_min(x); }) ? 0 : 1;
+  if (what == "max_i64")  return run<i64>(q, n, "max_i64", -1, [](auto &r, i64 x) { r.fetch_max(x); }) ? 0 : 1;
+  if (what == "and_i64")  return run<i64>(q, n, "and_i64", -1, [](auto &r, i64 x) { r.fetch_and(x); }) ? 0 : 1;
+  if (what == "or_i64")   return run<i64>(q, n, "or_i64", 0, [](auto &r, i64 x) { r.fetch_or(x); }) ? 0 : 1;
+  if (what == "xor_i64")  return run<i64>(q, n, "xor_i64", 0, [](auto &r, i64 x) { r.fetch_xor(x); }) ? 0 : 1;
+  if (what == "load_i64") return run<i64>(q, n, "load_i64", 7, [](auto &r, i64) { volatile i64 v = r.load(); (void)v; }) ? 0 : 1;
+  if (what == "exch_i64") return run<i64>(q, n, "exch_i64", 0, [](auto &r, i64 x) { r.exchange(x); }) ? 0 : 1;
+  if (what == "cas_i64")  return run<i64>(q, n, "cas_i64", 0, [](auto &r, i64 x) { i64 e = 0; r.compare_exchange_strong(e, x); }) ? 0 : 1;
+  if (what == "ptr_add") {
+    // a pointer atomic, as the test does it
+    int *base = sycl::malloc_shared<int>(4, q);
+    auto *slot = sycl::malloc_shared<int *>(1, q);
+    *slot = base;
+    q.parallel_for(sycl::range<1>{n}, [=](sycl::id<1> idx) {
+       sycl::atomic_ref<int *, sycl::memory_order::relaxed, sycl::memory_scope::device> r{*slot};
+       r.fetch_add((std::ptrdiff_t)0);
+     }).wait();
+    std::printf("%-12s result = %s\n", "ptr_add", *slot == base ? "base" : "moved");
+    sycl::free(slot, q);
+    sycl::free(base, q);
+    return 0;
+  }
+
   std::printf("unknown operation: %s\n", argv[1]);
   return 2;
 }

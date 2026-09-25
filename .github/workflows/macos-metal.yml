@@ -98,7 +98,8 @@ jobs:
         ${GITHUB_WORKSPACE}/install/bin/acpp --acpp-targets=generic -O2 \
           -o atomic64_ops atomic64_ops.cpp
         mkdir -p ${GITHUB_WORKSPACE}/msl-dump
-        for op in add add_used sub add_i64 sub_i64 exchange load store and or xor min max cas; do
+        for op in add add_used sub add_i64 sub_i64 exchange exch_i64 load load_i64 store \
+                  and and_i64 or or_i64 xor xor_i64 min min_i64 max max_i64 cas cas_i64 ptr_add; do
           echo "=== $op"
           mkdir -p ${GITHUB_WORKSPACE}/msl-dump/$op
           ACPP_METAL_DUMP_DIRECTORY=${GITHUB_WORKSPACE}/msl-dump/$op \
@@ -107,10 +108,23 @@ jobs:
             || echo "$op FAILED (exit $?)"
         done
 
+    # TEMPORARY: the atomic tests alone, with the shaders dumped and their paths
+    # logged, so that the kernel a device refuses can be named
+    - name: run atomic tests with a dump
+      run: |
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        mkdir -p ${GITHUB_WORKSPACE}/msl-dump/atomic-tests
+        ACPP_METAL_DUMP_DIRECTORY=${GITHUB_WORKSPACE}/msl-dump/atomic-tests \
+        ACPP_DEBUG_LEVEL=3 DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+          ./sycl_tests --run_test=atomic_tests 2>&1 | grep -E "dumped shader|error|fatal" | tail -40 \
+          || echo "atomic tests FAILED"
+
+    # TEMPORARY: only the atomic tests, the other 787 cases are not the question
     - name: run Metal tests (sycl)
       run: |
         cd ${GITHUB_WORKSPACE}/build/tests-sscp
-        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib ./sycl_tests
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+          ./sycl_tests --run_test=atomic_tests
 
     - name: run Metal tests (pcuda)
       run: |
