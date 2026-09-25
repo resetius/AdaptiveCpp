@@ -15,6 +15,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <atomic>
+#include <cstdio>
 
 #undef nil
 
@@ -63,10 +65,14 @@ void dump_metal_source(const std::string& source,
       c = '_';
     }
   }
-  if (name.size() > 80) {
-    name.resize(80);
+  if (name.size() > 180) {
+    name.resize(180);
   }
-  std::string path = std::string{dir} + "/" + name + ".metal";
+  // numbered, so that the order of compilation is visible
+  static std::atomic<int> counter{0};
+  char prefix[8];
+  std::snprintf(prefix, sizeof(prefix), "%03d_", counter++);
+  std::string path = std::string{dir} + "/" + prefix + name + ".metal";
   std::ofstream out{path};
   out << source;
   HIPSYCL_DEBUG_INFO << "metal_code_object: dumped shader to " << path << std::endl;
