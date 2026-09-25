@@ -12,6 +12,9 @@
 
 #include <Metal/Metal.hpp>
 #include <string_view>
+#include <cctype>
+#include <cstdlib>
+#include <fstream>
 
 #undef nil
 
@@ -46,9 +49,34 @@ bool parse_requires_atomic64_locks(const std::string& source) {
   return false;
 }
 
+// TEMPORARY: with ACPP_METAL_DUMP_DIRECTORY set, every generated shader is
+// written there, so that a source a device refuses can be taken off a CI runner.
+void dump_metal_source(const std::string& source,
+                       const std::vector<std::string>& kernel_names) {
+  const char* dir = std::getenv("ACPP_METAL_DUMP_DIRECTORY");
+  if (!dir) {
+    return;
+  }
+  std::string name = kernel_names.empty() ? std::string{"kernel"} : kernel_names.front();
+  for (char& c : name) {
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_') {
+      c = '_';
+    }
+  }
+  if (name.size() > 80) {
+    name.resize(80);
+  }
+  std::string path = std::string{dir} + "/" + name + ".metal";
+  std::ofstream out{path};
+  out << source;
+  HIPSYCL_DEBUG_INFO << "metal_code_object: dumped shader to " << path << std::endl;
+}
+
 result build_metal_library_from_source(MTL::Library*& library,
                                        MTL::Device* device,
-                                       const std::string& source) {
+                                       const std::string& source,
+                                       const std::vector<std::string>& kernel_names) {
+  dump_metal_source(source, kernel_names);
   if (!device) {
     return make_error(__acpp_here(),
                       error_info{"metal_code_object: Device is null"});
@@ -155,7 +183,7 @@ result metal_sscp_executable_object::build(const std::string& source) {
   if (_library != nullptr)
     return make_success();
 
-  return build_metal_library_from_source(_library, _device, source);
+  return build_metal_library_from_source(_library, _device, source, _kernel_names);
 }
 
 bool metal_sscp_executable_object::contains(

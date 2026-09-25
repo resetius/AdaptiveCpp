@@ -90,10 +90,26 @@ jobs:
             perl -e 'alarm 180; exec @ARGV' ./fetch_add_scatter $n 4 || echo "FAILED or timed out (exit $?)"
         done
 
-    # TEMPORARY: exactly the test case that fails, with a time limit
-    - name: run atomic_tests/fetch_op
+    # TEMPORARY: one operation per process, with the generated shader dumped, so
+    # that the operation a device refuses is named and its source can be taken
+    - name: probe every 64-bit operation
       run: |
-        cd ${GITHUB_WORKSPACE}/build/tests-sscp
-        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
-          perl -e 'alarm 300; exec @ARGV' ./sycl_tests --run_test=atomic_tests/fetch_op \
-          || echo "FAILED or timed out (exit $?)"
+        cd ${GITHUB_WORKSPACE}/ci-probe
+        ${GITHUB_WORKSPACE}/install/bin/acpp --acpp-targets=generic -O2 \
+          -o atomic64_ops atomic64_ops.cpp
+        mkdir -p ${GITHUB_WORKSPACE}/msl-dump
+        for op in add add_used sub add_i64 sub_i64 exchange load store and or xor min max cas; do
+          echo "=== $op"
+          mkdir -p ${GITHUB_WORKSPACE}/msl-dump/$op
+          ACPP_METAL_DUMP_DIRECTORY=${GITHUB_WORKSPACE}/msl-dump/$op \
+          DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+            perl -e 'alarm 120; exec @ARGV' ./atomic64_ops $op 2048 \
+            || echo "$op FAILED (exit $?)"
+        done
+
+    - name: upload the dumped shaders
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: msl-dump
+        path: ${{ github.workspace }}/msl-dump
