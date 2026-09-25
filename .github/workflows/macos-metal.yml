@@ -17,12 +17,46 @@ jobs:
       with:
         submodules: 'recursive'
 
-    # TEMPORARY: only the vote diagnostics, the build is in git history
-    - name: probe SIMD votes
+    - name: install dependencies
       run: |
-        cd ${GITHUB_WORKSPACE}/ci-probe
-        clang -fobjc-arc -framework Metal -framework Foundation -O2 -o run_diag run_diag.m
-        clang -fobjc-arc -framework Metal -framework Foundation -O2 -o run_minmax run_minmax.m
-        ./run_minmax 256
-        ./run_minmax 2048
-        ./run_diag 2048 256
+        set +e
+        brew update
+        brew install llvm@20 lld@20 libomp boost ninja lit
+        set -e
+
+    - name: download metal-cpp
+      run: |
+        curl -L -o metal-cpp.zip https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip
+        unzip metal-cpp.zip -d ${GITHUB_WORKSPACE}/metal-cpp-extracted
+
+    - name: build AdaptiveCpp
+      run: |
+        LLVM_PREFIX=$(brew --prefix llvm@20)
+        LLD_PREFIX=$(brew --prefix lld@20)
+        OMP_PREFIX=$(brew --prefix libomp)
+        METAL_CPP_DIR=$(ls -d ${GITHUB_WORKSPACE}/metal-cpp-extracted/metal-cpp* | head -1)
+
+        mkdir build && cd build
+        cmake .. -GNinja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_C_COMPILER=/usr/bin/clang \
+          -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
+          -DCLANG_EXECUTABLE_PATH=${LLVM_PREFIX}/bin/clang++ \
+          -DLLVM_DIR=${LLVM_PREFIX}/lib/cmake/llvm \
+          -DCMAKE_OSX_SYSROOT="$(xcrun --show-sdk-path)" \
+          -DCMAKE_INSTALL_PREFIX=${GITHUB_WORKSPACE}/install \
+          -DWITH_OPENCL_BACKEND=OFF \
+          -DWITH_METAL_BACKEND=ON \
+          -DACPP_COMPILER_FEATURE_PROFILE=full \
+          -DACPP_LLD_PATH=${LLD_PREFIX}/bin/ld64.lld \
+          -DMETAL_INCLUDE_DIR=${METAL_CPP_DIR} \
+          -DSEQUENTIAL_LINK_LINE=${OMP_PREFIX}/lib/libomp.dylib \
+          "-DOMP_LINK_LINE=-fopenmp ${OMP_PREFIX}/lib/libomp.dylib -L${OMP_PREFIX}/lib/" \
+          "-DOMP_CXX_FLAGS=-fopenmp -D_ENABLE_EXTENDED_ALIGNED_STORAGE -I${OMP_PREFIX}/include"
+        ninja install
+
+    # TEMPORARY: report what the runner's GPU looks like
+    - name: acpp-info
+      run: |
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+          ${GITHUB_WORKSPACE}/install/bin/acpp-info
