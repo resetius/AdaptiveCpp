@@ -15,7 +15,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
-#include <atomic>
+#include <chrono>
 #include <cstdio>
 
 #undef nil
@@ -68,10 +68,12 @@ void dump_metal_source(const std::string& source,
   if (name.size() > 180) {
     name.resize(180);
   }
-  // numbered, so that the order of compilation is visible
-  static std::atomic<int> counter{0};
-  char prefix[8];
-  std::snprintf(prefix, sizeof(prefix), "%03d_", counter++);
+  // a time stamp, so that the order of compilation is visible even though the
+  // tests tear the runtime down between cases and reload the backend
+  const auto now = std::chrono::system_clock::now().time_since_epoch();
+  const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+  char prefix[32];
+  std::snprintf(prefix, sizeof(prefix), "%lld_", (long long)micros);
   std::string path = std::string{dir} + "/" + prefix + name + ".metal";
   std::ofstream out{path};
   out << source;
