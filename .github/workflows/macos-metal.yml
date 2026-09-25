@@ -77,10 +77,17 @@ jobs:
         cd ${GITHUB_WORKSPACE}/ci-probe
         ${GITHUB_WORKSPACE}/install/bin/acpp --acpp-targets=generic -O2 \
           -o fetch_add_probe fetch_add_probe.cpp
+        ${GITHUB_WORKSPACE}/install/bin/acpp --acpp-targets=generic -O2 \
+          -o fetch_add_scatter fetch_add_scatter.cpp
         for n in 32 256 2048; do
-          echo "=== n=$n"
+          echo "=== one address, n=$n"
           DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
             perl -e 'alarm 180; exec @ARGV' ./fetch_add_probe $n || echo "FAILED or timed out (exit $?)"
+        done
+        for n in 32 2048; do
+          echo "=== one address per item, n=$n"
+          DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+            perl -e 'alarm 180; exec @ARGV' ./fetch_add_scatter $n 4 || echo "FAILED or timed out (exit $?)"
         done
 
     # TEMPORARY: exactly the test case that fails, with a time limit

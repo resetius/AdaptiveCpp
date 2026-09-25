@@ -14,6 +14,7 @@
 #include "hipSYCL/sycl/libkernel/sscp/builtins/builtin_config.hpp"
 
 #include "helpers.hpp"
+#include "scan_helpers.hpp"
 
 using namespace hipsycl::sycl::detail::metal_builtins;
 
@@ -538,6 +539,7 @@ HIPSYCL_SSCP_BUILTIN f32 __acpp_sscp_atomic_fetch_max_f32(
 HIPSYCL_SSCP_BUILTIN u32* __acpp_sscp_metal_symbol_atomic64_lock_base(const char* s);
 HIPSYCL_SSCP_BUILTIN u64 __acpp_sscp_metal_symbol_active_threads(const char* s);
 HIPSYCL_SSCP_BUILTIN u64 __acpp_sscp_metal_ballot(const char* s, bool pred);
+HIPSYCL_SSCP_BUILTIN bool __acpp_sscp_metal_simd_is_first(const char* s);
 
 namespace {
 
@@ -553,6 +555,10 @@ inline u32* atomic64_lock_for(const void* ptr) {
 
 inline u64 atomic64_active_threads() {
   return __acpp_sscp_metal_symbol_active_threads("(ulong)(simd_vote::vote_t)simd_active_threads_mask()");
+}
+
+inline bool atomic64_is_first() {
+  return __acpp_sscp_metal_simd_is_first("simd_is_first");
 }
 
 inline u64 atomic64_ballot(bool pred) {
@@ -620,6 +626,63 @@ inline u64 atomic64_update(u64* ptr, __acpp_sscp_memory_scope scope, F f) {
   return ((u64)old_high << 32) | (u64)old_low;
 }
 
+// Lanes of a SIMD group that work on one address are served with a single lock
+// acquisition: the operands are summed with prefix sums, the first lane applies
+// the total, and every lane takes its own old value as base plus its prefix.
+// Only one lane competes for the lock, which is what devices without
+// independent forward progress for sub-groups need.
+inline u64 atomic64_add(u64* ptr, u64 x, __acpp_sscp_memory_scope scope) {
+  // 16-bit pieces: the sum of a piece over a SIMD group still fits in 32 bits,
+  // and the pieces are added back together so that carries propagate
+  u32 x0 = (u32)x & 0xffff;
+  u32 x1 = (u32)(x >> 16) & 0xffff;
+  u32 x2 = (u32)(x >> 32) & 0xffff;
+  u32 x3 = (u32)(x >> 48) & 0xffff;
+
+  u32 p0 = __acpp_sscp_metal_scan<u32>("simd_prefix_exclusive_sum", x0);
+  u32 p1 = __acpp_sscp_metal_scan<u32>("simd_prefix_exclusive_sum", x1);
+  u32 p2 = __acpp_sscp_metal_scan<u32>("simd_prefix_exclusive_sum", x2);
+  u32 p3 = __acpp_sscp_metal_scan<u32>("simd_prefix_exclusive_sum", x3);
+
+  u32 s0 = __acpp_sscp_metal_scan<u32>("simd_sum", x0);
+  u32 s1 = __acpp_sscp_metal_scan<u32>("simd_sum", x1);
+  u32 s2 = __acpp_sscp_metal_scan<u32>("simd_sum", x2);
+  u32 s3 = __acpp_sscp_metal_scan<u32>("simd_sum", x3);
+
+  u64 prefix = ((u64)p3 << 48) + ((u64)p2 << 32) + ((u64)p1 << 16) + (u64)p0;
+  u64 total = ((u64)s3 << 48) + ((u64)s2 << 32) + ((u64)s1 << 16) + (u64)s0;
+
+  u32 base_low = 0;
+  u32 base_high = 0;
+  if (atomic64_is_first()) {
+    u32* lock = atomic64_lock_for(ptr);
+    while (!atomic64_try_lock(lock)) {
+      ;
+    }
+    __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
+    u64 base = atomic64_read(ptr);
+    atomic64_write(ptr, base + total);
+    base_low = (u32)base;
+    base_high = (u32)(base >> 32);
+    __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
+    atomic64_unlock(lock);
+  }
+
+  base_low = __acpp_sscp_metal_scan<u32>("simd_broadcast_first", base_low);
+  base_high = __acpp_sscp_metal_scan<u32>("simd_broadcast_first", base_high);
+
+  return (((u64)base_high << 32) | (u64)base_low) + prefix;
+}
+
+// Aggregation is only valid while the whole group works on one address.
+inline bool atomic64_address_is_uniform(const void* ptr) {
+  u64 address = (u64)ptr;
+  u32 low = __acpp_sscp_metal_scan<u32>("simd_broadcast_first", (u32)address);
+  u32 high = __acpp_sscp_metal_scan<u32>("simd_broadcast_first", (u32)(address >> 32));
+  u64 first = ((u64)high << 32) | (u64)low;
+  return atomic64_ballot(first == address) == atomic64_active_threads();
+}
+
 inline bool atomic64_compare_exchange(u64* ptr, u64* expected, u64 desired,
                                       __acpp_sscp_memory_scope scope) {
   u32* lock = atomic64_lock_for(ptr);
@@ -662,7 +725,6 @@ ACPP_ATOMIC64_UPDATE(fetch_and, i64, old & (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_or,  i64, old | (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_xor, i64, old ^ (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_add, i64, old + (u64)x)
-ACPP_ATOMIC64_UPDATE(fetch_add, u64, old + x)
 ACPP_ATOMIC64_UPDATE(fetch_sub, i64, old - (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_sub, u64, old - x)
 ACPP_ATOMIC64_UPDATE(fetch_min, i64, (i64)old < x ? old : (u64)x)
@@ -671,6 +733,15 @@ ACPP_ATOMIC64_UPDATE(fetch_max, i64, (i64)old > x ? old : (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_max, u64, old > x ? old : x)
 
 #undef ACPP_ATOMIC64_UPDATE
+
+HIPSYCL_SSCP_BUILTIN u64 __acpp_sscp_atomic_fetch_add_u64(
+    __acpp_sscp_address_space as, __acpp_sscp_memory_order order,
+    __acpp_sscp_memory_scope scope, u64 *ptr, u64 x) {
+  if (atomic64_address_is_uniform(ptr)) {
+    return atomic64_add(ptr, x, scope);
+  }
+  return atomic64_update(ptr, scope, [=](u64 old) { return old + x; });
+}
 
 #define ACPP_ATOMIC64_COMPARE_EXCHANGE(op) \
 HIPSYCL_SSCP_BUILTIN bool __acpp_sscp_cmp_exch_##op##_i64( \
