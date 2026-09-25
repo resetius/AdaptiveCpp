@@ -53,6 +53,18 @@ jobs:
           "-DOMP_CXX_FLAGS=-fopenmp -D_ENABLE_EXTENDED_ALIGNED_STORAGE -I${OMP_PREFIX}/include"
         ninja install
 
+    - name: build generic SSCP tests
+      run: |
+        mkdir ${GITHUB_WORKSPACE}/build/tests-sscp
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        cmake -GNinja \
+          -DACPP_TARGETS="generic" \
+          -DAdaptiveCpp_DIR=${GITHUB_WORKSPACE}/install/lib/cmake/AdaptiveCpp \
+          -DWITH_PCUDA_TESTS=ON \
+          -DACPP_TEST_WORK_GROUP_SHUFFLE_EXT=ON \
+          ${GITHUB_WORKSPACE}/tests
+        ninja
+
     - name: acpp-info
       run: |
         DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
@@ -70,3 +82,11 @@ jobs:
           DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
             perl -e 'alarm 180; exec @ARGV' ./fetch_add_probe $n || echo "FAILED or timed out (exit $?)"
         done
+
+    # TEMPORARY: exactly the test case that fails, with a time limit
+    - name: run atomic_tests/fetch_op
+      run: |
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+          perl -e 'alarm 300; exec @ARGV' ./sycl_tests --run_test=atomic_tests/fetch_op \
+          || echo "FAILED or timed out (exit $?)"
