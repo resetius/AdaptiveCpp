@@ -8,10 +8,8 @@ on:
 jobs:
   build_metal:
     name: Metal backend [macOS, LLVM 20]
-    # macos-26 is specified explicitly: as of early 2026 it is in public preview
-    # on GitHub Actions and is not yet selected by 'macos-latest'. We need it
-    # because metal-cpp requires macOS 26 SDK (MTL::LanguageVersion4_0 etc.).
-    runs-on: macos-26
+    # TEMPORARY: the xcode-27 image, in public preview, runs macOS 27.0 (26A428)
+    runs-on: xcode-27
     steps:
     - uses: actions/checkout@v7
       with:
@@ -55,8 +53,44 @@ jobs:
           "-DOMP_CXX_FLAGS=-fopenmp -D_ENABLE_EXTENDED_ALIGNED_STORAGE -I${OMP_PREFIX}/include"
         ninja install
 
-    # TEMPORARY: report what the runner's GPU looks like
+    - name: build generic SSCP tests
+      run: |
+        mkdir ${GITHUB_WORKSPACE}/build/tests-sscp
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        cmake -GNinja \
+          -DACPP_TARGETS="generic" \
+          -DAdaptiveCpp_DIR=${GITHUB_WORKSPACE}/install/lib/cmake/AdaptiveCpp \
+          -DWITH_PCUDA_TESTS=ON \
+          -DACPP_TEST_WORK_GROUP_SHUFFLE_EXT=ON \
+          ${GITHUB_WORKSPACE}/tests
+        ninja
+
     - name: acpp-info
       run: |
         DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
-          ${GITHUB_WORKSPACE}/install/bin/acpp-info
+          ${GITHUB_WORKSPACE}/install/bin/acpp-info | head -40
+
+    - name: run Metal tests (sycl)
+      run: |
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib ./sycl_tests
+
+    - name: run Metal tests (pcuda)
+      run: |
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib ./pcuda_tests
+
+    - name: run Metal tests (lit sscp)
+      run: |
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+        PATH=$(brew --prefix llvm@20)/bin:$PATH \
+        ninja check-sscp
+
+    - name: run Metal tests (lit reflection)
+      run: |
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+        PATH=$(brew --prefix llvm@20)/bin:$PATH \
+        ninja check-reflection
+
