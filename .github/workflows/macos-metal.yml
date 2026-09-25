@@ -22,17 +22,17 @@ jobs:
         brew install llvm@20 lld@20 libomp boost ninja lit
         set -e
 
-    - name: download metal-cpp
+    - name: fetch metal-cpp
       run: |
-        curl -L -o metal-cpp.zip https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip
-        unzip metal-cpp.zip -d ${GITHUB_WORKSPACE}/metal-cpp-extracted
+        git clone --depth 1 --branch release/metal-cpp_macOS27_iOS27 \
+          https://github.com/apple/metal-cpp.git ${GITHUB_WORKSPACE}/metal-cpp
 
     - name: build AdaptiveCpp
       run: |
         LLVM_PREFIX=$(brew --prefix llvm@20)
         LLD_PREFIX=$(brew --prefix lld@20)
         OMP_PREFIX=$(brew --prefix libomp)
-        METAL_CPP_DIR=$(ls -d ${GITHUB_WORKSPACE}/metal-cpp-extracted/metal-cpp* | head -1)
+        METAL_CPP_DIR=${GITHUB_WORKSPACE}/metal-cpp
 
         mkdir build && cd build
         cmake .. -GNinja \
