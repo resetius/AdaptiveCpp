@@ -11,6 +11,7 @@
 
 #include "hipSYCL/sycl/libkernel/sscp/builtins/atomic.hpp"
 #include "hipSYCL/sycl/libkernel/sscp/builtins/barrier.hpp"
+#include "hipSYCL/sycl/libkernel/sscp/builtins/subgroup.hpp"
 #include "hipSYCL/sycl/libkernel/sscp/builtins/builtin_config.hpp"
 
 #include "helpers.hpp"
@@ -595,33 +596,29 @@ inline void atomic64_write(u64* ptr, u64 value) {
     lower + 1, (u32)(value >> 32));
 }
 
-// SIMD lanes execute in lockstep. A lane that exits early can starve the lock
-// holder, so keep all active lanes in the loop until each has finished
+// The lanes of a SIMD group take their locks one after another, so that only one
+// of them competes at a time. The loop is the same for the whole group, which is
+// what devices without independent forward progress for sub-groups need.
 template<class F>
-inline u64 atomic64_update(u64* ptr, __acpp_sscp_memory_scope scope, F f) {
-  u32* lock = atomic64_lock_for(ptr);
-  // The old value is kept in two 32-bit halves: some Metal devices fail to
-  // compile a kernel in which a 64-bit value lives across the voting loop.
+inline u64 atomic64_update_ordered(u64* ptr, __acpp_sscp_memory_scope scope, F f) {
+  const u32 my_lane = __acpp_sscp_get_subgroup_local_id();
+  const u32 lanes = __acpp_sscp_get_subgroup_max_size();
   u32 old_low = 0;
   u32 old_high = 0;
-  // Prevent loop peeling for finished lanes.
-  volatile bool done = false;
-  u64 active = atomic64_active_threads();
-  u64 done_active = 0;
-  while (active != done_active) {
-    if (!done) {
-      if (atomic64_try_lock(lock)) {
-        __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
-        u64 old = atomic64_read(ptr);
-        atomic64_write(ptr, f(old));
-        old_low = (u32)old;
-        old_high = (u32)(old >> 32);
-        __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
-        atomic64_unlock(lock);
-        done = true;
+  for (u32 lane = 0; lane < lanes; ++lane) {
+    if (lane == my_lane) {
+      u32* lock = atomic64_lock_for(ptr);
+      while (!atomic64_try_lock(lock)) {
+        ;
       }
+      __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
+      u64 old = atomic64_read(ptr);
+      atomic64_write(ptr, f(old));
+      old_low = (u32)old;
+      old_high = (u32)(old >> 32);
+      __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
+      atomic64_unlock(lock);
     }
-    done_active = atomic64_ballot(done);
   }
   return ((u64)old_high << 32) | (u64)old_low;
 }
@@ -685,28 +682,26 @@ inline bool atomic64_address_is_uniform(const void* ptr) {
 
 inline bool atomic64_compare_exchange(u64* ptr, u64* expected, u64 desired,
                                       __acpp_sscp_memory_scope scope) {
-  u32* lock = atomic64_lock_for(ptr);
+  const u32 my_lane = __acpp_sscp_get_subgroup_local_id();
+  const u32 lanes = __acpp_sscp_get_subgroup_max_size();
   bool success = false;
-  volatile bool done = false;
-  u64 active = atomic64_active_threads();
-  u64 done_active = 0;
-  while (active != done_active) {
-    if (!done) {
-      if (atomic64_try_lock(lock)) {
-        __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
-        u64 old = atomic64_read(ptr);
-        success = old == *expected;
-        if (success) {
-          atomic64_write(ptr, desired);
-        } else {
-          *expected = old;
-        }
-        __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
-        atomic64_unlock(lock);
-        done = true;
+  for (u32 lane = 0; lane < lanes; ++lane) {
+    if (lane == my_lane) {
+      u32* lock = atomic64_lock_for(ptr);
+      while (!atomic64_try_lock(lock)) {
+        ;
       }
+      __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
+      u64 old = atomic64_read(ptr);
+      success = old == *expected;
+      if (success) {
+        atomic64_write(ptr, desired);
+      } else {
+        *expected = old;
+      }
+      __acpp_sscp_memory_fence(scope, __acpp_sscp_memory_order::seq_cst);
+      atomic64_unlock(lock);
     }
-    done_active = atomic64_ballot(done);
   }
   return success;
 }
@@ -717,16 +712,13 @@ inline bool atomic64_compare_exchange(u64* ptr, u64* expected, u64 desired,
 HIPSYCL_SSCP_BUILTIN type __acpp_sscp_atomic_##op##_##type( \
     __acpp_sscp_address_space as, __acpp_sscp_memory_order order, \
     __acpp_sscp_memory_scope scope, type *ptr, type x) { \
-  return (type)atomic64_update((u64*)ptr, scope, [=](u64 old) { return (u64)(expr); }); \
+  return (type)atomic64_update_ordered((u64*)ptr, scope, [=](u64 old) { return (u64)(expr); }); \
 }
 
 ACPP_ATOMIC64_UPDATE(exchange,  i64, (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_and, i64, old & (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_or,  i64, old | (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_xor, i64, old ^ (u64)x)
-ACPP_ATOMIC64_UPDATE(fetch_add, i64, old + (u64)x)
-ACPP_ATOMIC64_UPDATE(fetch_sub, i64, old - (u64)x)
-ACPP_ATOMIC64_UPDATE(fetch_sub, u64, old - x)
 ACPP_ATOMIC64_UPDATE(fetch_min, i64, (i64)old < x ? old : (u64)x)
 ACPP_ATOMIC64_UPDATE(fetch_min, u64, old < x ? old : x)
 ACPP_ATOMIC64_UPDATE(fetch_max, i64, (i64)old > x ? old : (u64)x)
@@ -734,14 +726,26 @@ ACPP_ATOMIC64_UPDATE(fetch_max, u64, old > x ? old : x)
 
 #undef ACPP_ATOMIC64_UPDATE
 
-HIPSYCL_SSCP_BUILTIN u64 __acpp_sscp_atomic_fetch_add_u64(
-    __acpp_sscp_address_space as, __acpp_sscp_memory_order order,
-    __acpp_sscp_memory_scope scope, u64 *ptr, u64 x) {
-  if (atomic64_address_is_uniform(ptr)) {
-    return atomic64_add(ptr, x, scope);
-  }
-  return atomic64_update(ptr, scope, [=](u64 old) { return old + x; });
+// Addition and subtraction are the same operation on the bits, so signed and
+// unsigned both use the aggregated path.
+#define ACPP_ATOMIC64_ADD(op, type, operand) \
+HIPSYCL_SSCP_BUILTIN type __acpp_sscp_atomic_##op##_##type( \
+    __acpp_sscp_address_space as, __acpp_sscp_memory_order order, \
+    __acpp_sscp_memory_scope scope, type *ptr, type x) { \
+  const u64 value = (operand); \
+  if (atomic64_address_is_uniform(ptr)) { \
+    return (type)atomic64_add((u64*)ptr, value, scope); \
+  } \
+  return (type)atomic64_update_ordered((u64*)ptr, scope, \
+                                       [=](u64 old) { return old + value; }); \
 }
+
+ACPP_ATOMIC64_ADD(fetch_add, i64, (u64)x)
+ACPP_ATOMIC64_ADD(fetch_add, u64, x)
+ACPP_ATOMIC64_ADD(fetch_sub, i64, (u64)(-(i64)x))
+ACPP_ATOMIC64_ADD(fetch_sub, u64, (u64)(0 - x))
+
+#undef ACPP_ATOMIC64_ADD
 
 #define ACPP_ATOMIC64_COMPARE_EXCHANGE(op) \
 HIPSYCL_SSCP_BUILTIN bool __acpp_sscp_cmp_exch_##op##_i64( \
@@ -760,11 +764,11 @@ ACPP_ATOMIC64_COMPARE_EXCHANGE(strong)
 HIPSYCL_SSCP_BUILTIN void __acpp_sscp_atomic_store_i64(
   __acpp_sscp_address_space as, __acpp_sscp_memory_order order,
   __acpp_sscp_memory_scope scope, i64 *ptr, i64 x) {
-  atomic64_update((u64*)ptr, scope, [=](u64) { return (u64)x; });
+  atomic64_update_ordered((u64*)ptr, scope, [=](u64) { return (u64)x; });
 }
 
 HIPSYCL_SSCP_BUILTIN i64 __acpp_sscp_atomic_load_i64(
   __acpp_sscp_address_space as, __acpp_sscp_memory_order order,
   __acpp_sscp_memory_scope scope, i64 *ptr) {
-  return (i64)atomic64_update((u64*)ptr, scope, [](u64 old) { return old; });
+  return (i64)atomic64_update_ordered((u64*)ptr, scope, [](u64 old) { return old; });
 }
