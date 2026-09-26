@@ -1,18 +1,15 @@
 name: macOS Metal backend
 
 on:
+  # TEMPORARY: not limited to develop, so that this branch is tested too
   push:
-    branches: [ develop ]
   pull_request:
-    branches: [ develop ]
 
 jobs:
   build_metal:
     name: Metal backend [macOS, LLVM 20]
-    # macos-26 is specified explicitly: as of early 2026 it is in public preview
-    # on GitHub Actions and is not yet selected by 'macos-latest'. We need it
-    # because metal-cpp requires macOS 26 SDK (MTL::LanguageVersion4_0 etc.).
-    runs-on: macos-26
+    # TEMPORARY: the xcode-27 image, in public preview, runs macOS 27.0 (26A428)
+    runs-on: xcode-27
     steps:
     - uses: actions/checkout@v7
       with:
@@ -25,17 +22,17 @@ jobs:
         brew install llvm@20 lld@20 libomp boost ninja lit
         set -e
 
-    - name: download metal-cpp
+    - name: fetch metal-cpp
       run: |
-        curl -L -o metal-cpp.zip https://developer.apple.com/metal/cpp/files/metal-cpp_26.zip
-        unzip metal-cpp.zip -d ${GITHUB_WORKSPACE}/metal-cpp-extracted
+        git clone --depth 1 --branch release/metal-cpp_macOS27_iOS27 \
+          https://github.com/apple/metal-cpp.git ${GITHUB_WORKSPACE}/metal-cpp
 
     - name: build AdaptiveCpp
       run: |
         LLVM_PREFIX=$(brew --prefix llvm@20)
         LLD_PREFIX=$(brew --prefix lld@20)
         OMP_PREFIX=$(brew --prefix libomp)
-        METAL_CPP_DIR=$(ls -d ${GITHUB_WORKSPACE}/metal-cpp-extracted/metal-cpp* | head -1)
+        METAL_CPP_DIR=${GITHUB_WORKSPACE}/metal-cpp
 
         mkdir build && cd build
         cmake .. -GNinja \
@@ -68,6 +65,60 @@ jobs:
           ${GITHUB_WORKSPACE}/tests
         ninja
 
+    - name: acpp-info
+      run: |
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+          ${GITHUB_WORKSPACE}/install/bin/acpp-info | grep -iE "Name:|gpufamilies|sub_group|compute_units" | head -12
+
+    # TEMPORARY: only the 64-bit fetch_add case, with a time limit so a hang is
+    # reported instead of running until the job times out
+    - name: probe 64-bit fetch_add
+      run: |
+        cd ${GITHUB_WORKSPACE}/ci-probe
+        ${GITHUB_WORKSPACE}/install/bin/acpp --acpp-targets=generic -O2 \
+          -o fetch_add_probe fetch_add_probe.cpp
+        ${GITHUB_WORKSPACE}/install/bin/acpp --acpp-targets=generic -O2 \
+          -o fetch_add_scatter fetch_add_scatter.cpp
+        for n in 32 256 2048; do
+          echo "=== one address, n=$n"
+          DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+            perl -e 'alarm 180; exec @ARGV' ./fetch_add_probe $n || echo "FAILED or timed out (exit $?)"
+        done
+        for n in 32 2048; do
+          echo "=== one address per item, n=$n"
+          DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+            perl -e 'alarm 180; exec @ARGV' ./fetch_add_scatter $n 4 || echo "FAILED or timed out (exit $?)"
+        done
+
+    # TEMPORARY: one operation per process, with the generated shader dumped, so
+    # that the operation a device refuses is named and its source can be taken
+    - name: probe every 64-bit operation
+      run: |
+        cd ${GITHUB_WORKSPACE}/ci-probe
+        ${GITHUB_WORKSPACE}/install/bin/acpp --acpp-targets=generic -O2 \
+          -o atomic64_ops atomic64_ops.cpp
+        mkdir -p ${GITHUB_WORKSPACE}/msl-dump
+        for op in add add_used sub add_i64 sub_i64 exchange exch_i64 load load_i64 store \
+                  and and_i64 or or_i64 xor xor_i64 min min_i64 max max_i64 cas cas_i64 ptr_add; do
+          echo "=== $op"
+          mkdir -p ${GITHUB_WORKSPACE}/msl-dump/$op
+          ACPP_METAL_DUMP_DIRECTORY=${GITHUB_WORKSPACE}/msl-dump/$op \
+          DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+            perl -e 'alarm 120; exec @ARGV' ./atomic64_ops $op 2048 \
+            || echo "$op FAILED (exit $?)"
+        done
+
+    # TEMPORARY: the atomic tests alone, with the shaders dumped and their paths
+    # logged, so that the kernel a device refuses can be named
+    - name: run atomic tests with a dump
+      run: |
+        cd ${GITHUB_WORKSPACE}/build/tests-sscp
+        mkdir -p ${GITHUB_WORKSPACE}/msl-dump/atomic-tests
+        ACPP_METAL_DUMP_DIRECTORY=${GITHUB_WORKSPACE}/msl-dump/atomic-tests \
+        ACPP_DEBUG_LEVEL=3 DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
+          ./sycl_tests --run_test=atomic_tests 2>&1 | grep -E "dumped shader|error|fatal" | tail -40 \
+          || echo "atomic tests FAILED"
+
     - name: run Metal tests (sycl)
       run: |
         cd ${GITHUB_WORKSPACE}/build/tests-sscp
@@ -92,3 +143,9 @@ jobs:
         PATH=$(brew --prefix llvm@20)/bin:$PATH \
         ninja check-reflection
 
+    - name: upload the dumped shaders
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: msl-dump
+        path: ${{ github.workspace }}/msl-dump

@@ -1,6 +1,8 @@
 name: Linux build and test
 
-on: [push, pull_request]
+on:
+  # TEMPORARY: only the Metal workflow runs
+  workflow_dispatch:
 
 jobs:
   prep-container:

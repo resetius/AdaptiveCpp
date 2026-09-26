@@ -1,0 +1,449 @@
+// TEMPORARY variant: memory fences removed
+// capabilities: atomic64
+
+#include <metal_stdlib>
+using namespace metal;
+
+// These structs are used for void** dereferencing
+struct __struct_ptr_to_device {
+  device void* value;
+};
+
+struct __struct_ptr_to_threadgroup {
+  threadgroup void* value;
+};
+
+struct __struct_ptr_to_constant {
+  constant void* value;
+};
+
+struct __struct_ptr_to_thread {
+  thread void* value;
+};
+
+template<typename To, typename From>
+struct __atomic_pointer_type {};
+
+template<typename To>
+struct __atomic_pointer_type<To, device void*> {
+  using type = device atomic<To>*;
+};
+
+template<typename To>
+struct __atomic_pointer_type<To, threadgroup void*> {
+  using type = threadgroup atomic<To>*;
+};
+
+template<typename To>
+struct __atomic_pointer_type<To, thread void*> {
+  using type = thread atomic<To>*;
+};
+
+template<typename To, typename From>
+inline typename __atomic_pointer_type<To, From>::type __atomic_pointer_cast(From ptr) {
+  return (typename __atomic_pointer_type<To, From>::type)(ptr);
+}
+
+template<typename To, typename From>
+struct __pointer_type {};
+
+template<typename To>
+struct __pointer_type<To, device void*> {
+  using type = device To*;
+};
+
+template<typename To>
+struct __pointer_type<To, threadgroup void*> {
+  using type = threadgroup To*;
+};
+
+template<typename To>
+struct __pointer_type<To, thread void*> {
+  using type = thread To*;
+};
+
+template<typename To, typename From>
+inline typename __pointer_type<To, From>::type __pointer_cast(From ptr) {
+  return (typename __pointer_type<To, From>::type)(ptr);
+}
+
+uint __simd_size [[threads_per_simdgroup]];
+uint __simd_group_id [[simdgroup_index_in_threadgroup]];
+uint __simd_lane_id [[thread_index_in_simdgroup]];
+
+uint3 __acpp_sscp_metal_group_id [[threadgroup_position_in_grid]];
+uint3 __acpp_sscp_metal_num_groups [[threadgroups_per_grid]];
+uint3 __acpp_sscp_metal_local_id [[thread_position_in_threadgroup]];
+uint3 __acpp_sscp_metal_local_size [[threads_per_threadgroup]];
+
+threadgroup void * constant __acpp_sscp_metal_dynamic_local_memory [[threadgroup(0)]];
+constant uint& constant __acpp_sscp_metal_dynamic_local_memory_size [[buffer(0)]];
+constant long& constant __acpp_sscp_metal_gpu_to_host_addr_diff [[buffer(1)]];
+device uint* constant __acpp_sscp_metal_atomic64_lock_base [[buffer(2)]];
+
+
+  inline char __as_signed(uchar value) {
+    return as_type<char>(value);
+  }
+
+  inline short __as_signed(ushort value) {
+    return as_type<short>(value);
+  }
+
+  inline int __as_signed(uint value) {
+    return as_type<int>(value);
+  }
+
+  inline long __as_signed(ulong value) {
+    return as_type<long>(value);
+  }
+
+  // LLVM sext i1 true to iN yields all-ones (-1), so replicate that semantic
+  inline int __as_signed(bool value) {
+    return value ? -1 : 0;
+  }
+
+struct i48u {
+  packed_ushort3 w;
+  i48u() : w(packed_ushort3(0,0,0)) {}
+  explicit i48u(packed_ushort3 ww) : w(ww) {}
+  explicit i48u(ushort x) : w(packed_ushort3(x, 0, 0)) {}
+  explicit i48u(uint x)
+  : w(packed_ushort3((ushort)(x & 0xffffu),
+                     (ushort)((x >> 16) & 0xffffu),
+                     0))
+  {}
+  explicit i48u(ulong x)
+  : w(packed_ushort3((ushort)(x & 0xfffful),
+                     (ushort)((x >> 16) & 0xfffful),
+                     (ushort)((x >> 32) & 0xfffful)))
+  {}
+
+  friend inline i48u operator|(i48u a, i48u b) {
+    return i48u(packed_ushort3((ushort)(a.w[0] | b.w[0]),
+                               (ushort)(a.w[1] | b.w[1]),
+                               (ushort)(a.w[2] | b.w[2])));
+  }
+
+  friend inline i48u operator<<(i48u a, uint bits) {
+    uint s = bits >> 4; // /16
+    if ((bits & 0xFu) != 0) {
+      ulong x = a.to_ulong();
+      x = (x << bits) & 0x0000FFFFFFFFFFFFul;
+      return i48u(x);
+    }
+    if (s == 0) return a;
+    if (s == 1) return i48u(packed_ushort3(0, a.w[0], a.w[1]));
+    if (s == 2) return i48u(packed_ushort3(0, 0, a.w[0]));
+    return i48u(); // >=48 => 0
+  }
+
+  friend inline i48u operator>>(i48u a, uint bits) {
+    uint s = bits >> 4; // /16
+    if ((bits & 0xFu) != 0) {
+      ulong x = a.to_ulong();
+      x = (x >> bits);
+      return i48u(x);
+    }
+    if (s == 0) return a;
+    if (s == 1) return i48u(packed_ushort3(a.w[1], a.w[2], 0));
+    if (s == 2) return i48u(packed_ushort3(a.w[2], 0, 0));
+    return i48u(); // >=48 => 0
+  }
+
+  inline ulong to_ulong() const {
+    return (ulong)w[0] | ((ulong)w[1] << 16) | ((ulong)w[2] << 32);
+  }
+};
+
+constexpr constant uchar t__str_18[76] = {0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x6cu, 0x6fu, 0x61u, 0x64u, 0x5fu, 0x65u, 0x78u, 0x70u, 0x6cu, 0x69u, 0x63u, 0x69u, 0x74u, 0x28u, 0x5fu, 0x5fu, 0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x70u, 0x6fu, 0x69u, 0x6eu, 0x74u, 0x65u, 0x72u, 0x5fu, 0x63u, 0x61u, 0x73u, 0x74u, 0x3cu, 0x75u, 0x69u, 0x6eu, 0x74u, 0x3eu, 0x28u, 0x25u, 0x73u, 0x29u, 0x2cu, 0x20u, 0x6du, 0x65u, 0x6du, 0x6fu, 0x72u, 0x79u, 0x5fu, 0x6fu, 0x72u, 0x64u, 0x65u, 0x72u, 0x5fu, 0x72u, 0x65u, 0x6cu, 0x61u, 0x78u, 0x65u, 0x64u, 0x29u, 0x0u};
+
+constexpr constant uchar t__str_19[145] = {0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x63u, 0x6fu, 0x6du, 0x70u, 0x61u, 0x72u, 0x65u, 0x5fu, 0x65u, 0x78u, 0x63u, 0x68u, 0x61u, 0x6eu, 0x67u, 0x65u, 0x5fu, 0x77u, 0x65u, 0x61u, 0x6bu, 0x5fu, 0x65u, 0x78u, 0x70u, 0x6cu, 0x69u, 0x63u, 0x69u, 0x74u, 0x28u, 0x5fu, 0x5fu, 0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x70u, 0x6fu, 0x69u, 0x6eu, 0x74u, 0x65u, 0x72u, 0x5fu, 0x63u, 0x61u, 0x73u, 0x74u, 0x3cu, 0x75u, 0x69u, 0x6eu, 0x74u, 0x3eu, 0x28u, 0x25u, 0x73u, 0x29u, 0x2cu, 0x20u, 0x5fu, 0x5fu, 0x70u, 0x6fu, 0x69u, 0x6eu, 0x74u, 0x65u, 0x72u, 0x5fu, 0x63u, 0x61u, 0x73u, 0x74u, 0x3cu, 0x75u, 0x69u, 0x6eu, 0x74u, 0x3eu, 0x28u, 0x25u, 0x73u, 0x29u, 0x2cu, 0x20u, 0x25u, 0x73u, 0x2cu, 0x20u, 0x6du, 0x65u, 0x6du, 0x6fu, 0x72u, 0x79u, 0x5fu, 0x6fu, 0x72u, 0x64u, 0x65u, 0x72u, 0x5fu, 0x72u, 0x65u, 0x6cu, 0x61u, 0x78u, 0x65u, 0x64u, 0x2cu, 0x20u, 0x6du, 0x65u, 0x6du, 0x6fu, 0x72u, 0x79u, 0x5fu, 0x6fu, 0x72u, 0x64u, 0x65u, 0x72u, 0x5fu, 0x72u, 0x65u, 0x6cu, 0x61u, 0x78u, 0x65u, 0x64u, 0x29u, 0x0u};
+
+constexpr constant uchar t__str_49[37] = {0x5fu, 0x5fu, 0x61u, 0x63u, 0x70u, 0x70u, 0x5fu, 0x73u, 0x73u, 0x63u, 0x70u, 0x5fu, 0x6du, 0x65u, 0x74u, 0x61u, 0x6cu, 0x5fu, 0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x36u, 0x34u, 0x5fu, 0x6cu, 0x6fu, 0x63u, 0x6bu, 0x5fu, 0x62u, 0x61u, 0x73u, 0x65u, 0x0u};
+
+constexpr constant uchar t__str_50[53] = {0x28u, 0x75u, 0x6cu, 0x6fu, 0x6eu, 0x67u, 0x29u, 0x28u, 0x73u, 0x69u, 0x6du, 0x64u, 0x5fu, 0x76u, 0x6fu, 0x74u, 0x65u, 0x3au, 0x3au, 0x76u, 0x6fu, 0x74u, 0x65u, 0x5fu, 0x74u, 0x29u, 0x73u, 0x69u, 0x6du, 0x64u, 0x5fu, 0x61u, 0x63u, 0x74u, 0x69u, 0x76u, 0x65u, 0x5fu, 0x74u, 0x68u, 0x72u, 0x65u, 0x61u, 0x64u, 0x73u, 0x5fu, 0x6du, 0x61u, 0x73u, 0x6bu, 0x28u, 0x29u, 0x0u};
+
+constexpr constant uchar t__str_51[81] = {0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x73u, 0x74u, 0x6fu, 0x72u, 0x65u, 0x5fu, 0x65u, 0x78u, 0x70u, 0x6cu, 0x69u, 0x63u, 0x69u, 0x74u, 0x28u, 0x5fu, 0x5fu, 0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x70u, 0x6fu, 0x69u, 0x6eu, 0x74u, 0x65u, 0x72u, 0x5fu, 0x63u, 0x61u, 0x73u, 0x74u, 0x3cu, 0x75u, 0x69u, 0x6eu, 0x74u, 0x3eu, 0x28u, 0x25u, 0x73u, 0x29u, 0x2cu, 0x20u, 0x25u, 0x73u, 0x2cu, 0x20u, 0x6du, 0x65u, 0x6du, 0x6fu, 0x72u, 0x79u, 0x5fu, 0x6fu, 0x72u, 0x64u, 0x65u, 0x72u, 0x5fu, 0x72u, 0x65u, 0x6cu, 0x61u, 0x78u, 0x65u, 0x64u, 0x29u, 0x0u};
+
+constexpr constant uchar t__str_52[42] = {0x28u, 0x75u, 0x6cu, 0x6fu, 0x6eu, 0x67u, 0x29u, 0x28u, 0x73u, 0x69u, 0x6du, 0x64u, 0x5fu, 0x76u, 0x6fu, 0x74u, 0x65u, 0x3au, 0x3au, 0x76u, 0x6fu, 0x74u, 0x65u, 0x5fu, 0x74u, 0x29u, 0x73u, 0x69u, 0x6du, 0x64u, 0x5fu, 0x62u, 0x61u, 0x6cu, 0x6cu, 0x6fu, 0x74u, 0x28u, 0x25u, 0x73u, 0x29u, 0x0u};
+
+constexpr constant uchar t__str_10_65[86] = {0x61u, 0x74u, 0x6fu, 0x6du, 0x69u, 0x63u, 0x5fu, 0x74u, 0x68u, 0x72u, 0x65u, 0x61u, 0x64u, 0x5fu, 0x66u, 0x65u, 0x6eu, 0x63u, 0x65u, 0x28u, 0x6du, 0x65u, 0x6du, 0x5fu, 0x66u, 0x6cu, 0x61u, 0x67u, 0x73u, 0x3au, 0x3au, 0x6du, 0x65u, 0x6du, 0x5fu, 0x64u, 0x65u, 0x76u, 0x69u, 0x63u, 0x65u, 0x2cu, 0x20u, 0x6du, 0x65u, 0x6du, 0x6fu, 0x72u, 0x79u, 0x5fu, 0x6fu, 0x72u, 0x64u, 0x65u, 0x72u, 0x5fu, 0x73u, 0x65u, 0x71u, 0x5fu, 0x63u, 0x73u, 0x74u, 0x2cu, 0x20u, 0x74u, 0x68u, 0x72u, 0x65u, 0x61u, 0x64u, 0x5fu, 0x73u, 0x63u, 0x6fu, 0x70u, 0x65u, 0x5fu, 0x64u, 0x65u, 0x76u, 0x69u, 0x63u, 0x65u, 0x29u, 0x0u};
+
+[[kernel]] void _Z18__acpp_sscp_kernelIN7hipsycl4glue15__sscp_dispatch11single_taskIZ4mainE3$_0EEEvRKT_ (device void* t0 [[buffer(3)]])
+{
+  // Locals
+  uint local0;
+  uchar local1;
+  uint local2;
+  uchar local3;
+  uint local4;
+  uchar local5;
+
+  // PHI input variables
+  ulong t26_in;
+  ulong t37_in;
+  ulong t41_in;
+
+  // Variables
+  device void* t10;
+  ulong t11;
+  ulong t12;
+  ulong t13;
+  ulong t14;
+  ulong t15;
+  device void* t16;
+  thread void* t17;
+  ulong t18;
+  bool t19;
+  thread void* t2;
+  device void* t21;
+  thread void* t22;
+  thread void* t23;
+  thread void* t24;
+  ulong t26;
+  bool t27;
+  bool t29;
+  thread void* t3;
+  uint t31;
+  uint t32;
+  ulong t33;
+  ulong t34;
+  ulong t35;
+  ulong t36;
+  ulong t37;
+  bool t38;
+  ulong t39;
+  thread void* t4;
+  bool t40;
+  ulong t41;
+  thread void* t42;
+  device void* t43;
+  device void* t44;
+  thread void* t45;
+  ulong t46;
+  bool t47;
+  ulong t49;
+  thread void* t5;
+  device void* t50;
+  uint t51;
+  ulong t52;
+  uint t53;
+  thread void* t54;
+  thread void* t55;
+  thread void* t56;
+  bool t58;
+  thread void* t6;
+  bool t60;
+  uint t62;
+  uint t63;
+  bool t64;
+  ulong t65;
+  bool t66;
+  thread void* t67;
+  device void* t68;
+  device void* t69;
+  thread void* t7;
+  thread void* t70;
+  ulong t71;
+  bool t72;
+  ulong t74;
+  device void* t75;
+  uint t76;
+  ulong t77;
+  uint t78;
+  thread void* t79;
+  device void* t8;
+  thread void* t80;
+  thread void* t81;
+  bool t83;
+  bool t85;
+  uint t87;
+  uint t88;
+  bool t89;
+  thread void* t9;
+  ulong t90;
+  bool t91;
+  uchar t_0__0__0__0_1_i;
+  uchar t_0__0__0__0_1_i1;
+  uchar t_0__0__0__0_1_i3;
+  uchar t_0__0__0__0__i;
+  uchar t_0__0__0__0__i2;
+  uchar t_0__0__0__0__i4;
+  bool t_inv;
+  bool t_inv12;
+  bool t_inv8;
+
+  // block %1
+  t2 = &local0; //   %2 = alloca i32, align 4, addrspace(5)
+  t3 = &local1; //   %3 = alloca i8, align 1, addrspace(5)
+  t4 = &local2; //   %4 = alloca i32, align 4, addrspace(5)
+  t5 = &local3; //   %5 = alloca i8, align 1, addrspace(5)
+  t6 = &local4; //   %6 = alloca i32, align 4, addrspace(5)
+  t7 = &local5; //   %7 = alloca i8, align 1, addrspace(5)
+  t8 = t0; //   %8 = addrspacecast ptr addrspace(1) %0 to ptr
+  t9 = t2; //   %9 = addrspacecast ptr addrspace(5) %2 to ptr
+  t10 = __acpp_sscp_metal_atomic64_lock_base;
+  t11 = (ulong) t8; //   %11 = ptrtoint ptr %8 to i64
+  t12 = t11 >> 0x3ul;
+  t13 = t11 >> 0x11ul;
+  t14 = t12 ^ t13;
+  t15 = t14 & 0x3ffful;
+  t16 = &(((device uint*)t10)[t15]); //   %16 = getelementptr inbounds nuw i32, ptr %10, i64 %15
+  t17 = t3; //   %17 = addrspacecast ptr addrspace(5) %3 to ptr
+  *((thread uchar*)t17) = 0x0u; //   store volatile i8 0, ptr %17, align 1, !tbaa !7
+  t18 = (ulong)(simd_vote::vote_t)simd_active_threads_mask();
+  t19 = (t18 != 0x0ul);
+  t41_in = 0x0ul;
+  if (t19) {
+    // block %20
+    t21 = &(((device uchar*)t8)[4]); //   %21 = getelementptr inbounds nuw i8, ptr %8, i64 4
+    t22 = t3; //   %22 = addrspacecast ptr addrspace(5) %3 to ptr
+    t23 = t3; //   %23 = addrspacecast ptr addrspace(5) %3 to ptr
+    t24 = t3; //   %24 = addrspacecast ptr addrspace(5) %3 to ptr
+    t26_in = 0x0ul;
+    while (true) {
+      // block %25
+      t26 = t26_in; //   %26 = phi i64 [ %37, %Flow11 ], [ 0, %20 ]
+      t_0__0__0__0_1_i3 = *((thread uchar*)t22); //   %.0..0..0..0.1.i3 = load volatile i8, ptr %22, align 1, !tbaa !7, !range !11, !noundef !12
+      t27 = (bool) t_0__0__0__0_1_i3; //   %27 = trunc nuw i8 %.0..0..0..0.1.i3 to i1
+      t_inv12 = t27 ^ true;
+      t37_in = t26;
+      if (t_inv12) {
+        // block %28
+        *((thread uint*)t2) = 0x0u; //   store i32 0, ptr addrspace(5) %2, align 4, !tbaa !13
+        t29 = atomic_compare_exchange_weak_explicit(__atomic_pointer_cast<uint>(t16), __pointer_cast<uint>(t9), 0x1u, memory_order_relaxed, memory_order_relaxed);
+        t37_in = t26;
+        if (t29) {
+          // block %30
+          t31 = atomic_load_explicit(__atomic_pointer_cast<uint>(t8), memory_order_relaxed);
+          t32 = atomic_load_explicit(__atomic_pointer_cast<uint>(t21), memory_order_relaxed);
+          t33 = (ulong) t32; //   %33 = zext i32 %32 to i64
+          t34 = t33 << 0x20ul;
+          t35 = (ulong) t31; //   %35 = zext i32 %31 to i64
+          t36 = t34 | t35;
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t8), t31, memory_order_relaxed);
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t21), t32, memory_order_relaxed);
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t16), 0x0u, memory_order_relaxed);
+          *((thread uchar*)t23) = 0x1u; //   store volatile i8 1, ptr %23, align 1, !tbaa !7
+          t37_in = t36;
+        }
+      }
+      // block %Flow11
+      t37 = t37_in; //   %37 = phi i64 [ %26, %25 ], [ %36, %30 ], [ %26, %28 ]
+      t_0__0__0__0__i4 = *((thread uchar*)t24); //   %.0..0..0..0..i4 = load volatile i8, ptr %24, align 1, !tbaa !7, !range !11, !noundef !12
+      t38 = (bool) t_0__0__0__0__i4; //   %38 = trunc nuw i8 %.0..0..0..0..i4 to i1
+      t39 = (ulong)(simd_vote::vote_t)simd_ballot(t38);
+      t40 = (t18 == t39);
+      t41_in = t37;
+      t26_in = t37;
+      if (t40) {
+        break;
+      } else {
+        continue;
+      }
+    }
+  }
+  // block %__acpp_sscp_atomic_load_i64.exit
+  t41 = t41_in; //   %41 = phi i64 [ 0, %1 ], [ %37, %Flow11 ]
+  t42 = t4; //   %42 = addrspacecast ptr addrspace(5) %4 to ptr
+  t43 = __acpp_sscp_metal_atomic64_lock_base;
+  t44 = &(((device uint*)t43)[t15]); //   %44 = getelementptr inbounds nuw i32, ptr %43, i64 %15
+  t45 = t5; //   %45 = addrspacecast ptr addrspace(5) %5 to ptr
+  *((thread uchar*)t45) = 0x0u; //   store volatile i8 0, ptr %45, align 1, !tbaa !7
+  t46 = (ulong)(simd_vote::vote_t)simd_active_threads_mask();
+  t47 = (t46 != 0x0ul);
+  if (t47) {
+    // block %48
+    t49 = t41 + 0x2ul; //   %49 = add i64 %41, 2
+    t50 = &(((device uchar*)t8)[4]); //   %50 = getelementptr inbounds nuw i8, ptr %8, i64 4
+    t51 = (uint) t49; //   %51 = trunc i64 %49 to i32
+    t52 = t49 >> 0x20ul;
+    t53 = (uint) t52; //   %53 = trunc nuw i64 %52 to i32
+    t54 = t5; //   %54 = addrspacecast ptr addrspace(5) %5 to ptr
+    t55 = t5; //   %55 = addrspacecast ptr addrspace(5) %5 to ptr
+    t56 = t5; //   %56 = addrspacecast ptr addrspace(5) %5 to ptr
+    while (true) {
+      // block %57
+      t_0__0__0__0_1_i1 = *((thread uchar*)t54); //   %.0..0..0..0.1.i1 = load volatile i8, ptr %54, align 1, !tbaa !7, !range !11, !noundef !12
+      t58 = (bool) t_0__0__0__0_1_i1; //   %58 = trunc nuw i8 %.0..0..0..0.1.i1 to i1
+      t_inv8 = t58 ^ true;
+      if (t_inv8) {
+        // block %59
+        *((thread uint*)t4) = 0x0u; //   store i32 0, ptr addrspace(5) %4, align 4, !tbaa !13
+        t60 = atomic_compare_exchange_weak_explicit(__atomic_pointer_cast<uint>(t44), __pointer_cast<uint>(t42), 0x1u, memory_order_relaxed, memory_order_relaxed);
+        if (t60) {
+          // block %61
+          t62 = atomic_load_explicit(__atomic_pointer_cast<uint>(t8), memory_order_relaxed);
+          t63 = atomic_load_explicit(__atomic_pointer_cast<uint>(t50), memory_order_relaxed);
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t8), t51, memory_order_relaxed);
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t50), t53, memory_order_relaxed);
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t44), 0x0u, memory_order_relaxed);
+          *((thread uchar*)t55) = 0x1u; //   store volatile i8 1, ptr %55, align 1, !tbaa !7
+        }
+      }
+      // block %Flow7
+      t_0__0__0__0__i2 = *((thread uchar*)t56); //   %.0..0..0..0..i2 = load volatile i8, ptr %56, align 1, !tbaa !7, !range !11, !noundef !12
+      t64 = (bool) t_0__0__0__0__i2; //   %64 = trunc nuw i8 %.0..0..0..0..i2 to i1
+      t65 = (ulong)(simd_vote::vote_t)simd_ballot(t64);
+      t66 = (t46 == t65);
+      if (t66) {
+        break;
+      } else {
+        continue;
+      }
+    }
+  }
+  // block %__acpp_sscp_atomic_store_i64.exit
+  t67 = t6; //   %67 = addrspacecast ptr addrspace(5) %6 to ptr
+  t68 = __acpp_sscp_metal_atomic64_lock_base;
+  t69 = &(((device uint*)t68)[t15]); //   %69 = getelementptr inbounds nuw i32, ptr %68, i64 %15
+  t70 = t7; //   %70 = addrspacecast ptr addrspace(5) %7 to ptr
+  *((thread uchar*)t70) = 0x0u; //   store volatile i8 0, ptr %70, align 1, !tbaa !7
+  t71 = (ulong)(simd_vote::vote_t)simd_active_threads_mask();
+  t72 = (t71 != 0x0ul);
+  if (t72) {
+    // block %73
+    t74 = t41 + 0x1ul; //   %74 = add i64 %41, 1
+    t75 = &(((device uchar*)t8)[4]); //   %75 = getelementptr inbounds nuw i8, ptr %8, i64 4
+    t76 = (uint) t74; //   %76 = trunc i64 %74 to i32
+    t77 = t74 >> 0x20ul;
+    t78 = (uint) t77; //   %78 = trunc nuw i64 %77 to i32
+    t79 = t7; //   %79 = addrspacecast ptr addrspace(5) %7 to ptr
+    t80 = t7; //   %80 = addrspacecast ptr addrspace(5) %7 to ptr
+    t81 = t7; //   %81 = addrspacecast ptr addrspace(5) %7 to ptr
+    while (true) {
+      // block %82
+      t_0__0__0__0_1_i = *((thread uchar*)t79); //   %.0..0..0..0.1.i = load volatile i8, ptr %79, align 1, !tbaa !7, !range !11, !noundef !12
+      t83 = (bool) t_0__0__0__0_1_i; //   %83 = trunc nuw i8 %.0..0..0..0.1.i to i1
+      t_inv = t83 ^ true;
+      if (t_inv) {
+        // block %84
+        *((thread uint*)t6) = 0x0u; //   store i32 0, ptr addrspace(5) %6, align 4, !tbaa !13
+        t85 = atomic_compare_exchange_weak_explicit(__atomic_pointer_cast<uint>(t69), __pointer_cast<uint>(t67), 0x1u, memory_order_relaxed, memory_order_relaxed);
+        if (t85) {
+          // block %86
+          t87 = atomic_load_explicit(__atomic_pointer_cast<uint>(t8), memory_order_relaxed);
+          t88 = atomic_load_explicit(__atomic_pointer_cast<uint>(t75), memory_order_relaxed);
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t8), t76, memory_order_relaxed);
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t75), t78, memory_order_relaxed);
+          atomic_store_explicit(__atomic_pointer_cast<uint>(t69), 0x0u, memory_order_relaxed);
+          *((thread uchar*)t80) = 0x1u; //   store volatile i8 1, ptr %80, align 1, !tbaa !7
+        }
+      }
+      // block %Flow
+      t_0__0__0__0__i = *((thread uchar*)t81); //   %.0..0..0..0..i = load volatile i8, ptr %81, align 1, !tbaa !7, !range !11, !noundef !12
+      t89 = (bool) t_0__0__0__0__i; //   %89 = trunc nuw i8 %.0..0..0..0..i to i1
+      t90 = (ulong)(simd_vote::vote_t)simd_ballot(t89);
+      t91 = (t71 == t90);
+      if (t91) {
+        break;
+      } else {
+        continue;
+      }
+    }
+  }
+  // block %__acpp_sscp_atomic_exchange_i64.exit
+  return;
+}
+

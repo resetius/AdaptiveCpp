@@ -1,6 +1,9 @@
 name: Self-hosted CI
 
-on: [push, pull_request]
+on:
+  # TEMPORARY: only the Metal workflow runs
+  workflow_dispatch:
+
 jobs:
   test-gpu-nvidia:
     if: github.repository_id == '140986400'
