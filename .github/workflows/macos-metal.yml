@@ -119,12 +119,10 @@ jobs:
           ./sycl_tests --run_test=atomic_tests 2>&1 | grep -E "dumped shader|error|fatal" | tail -40 \
           || echo "atomic tests FAILED"
 
-    # TEMPORARY: only the atomic tests, the other 787 cases are not the question
     - name: run Metal tests (sycl)
       run: |
         cd ${GITHUB_WORKSPACE}/build/tests-sscp
-        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib \
-          ./sycl_tests --run_test=atomic_tests
+        DYLD_LIBRARY_PATH=${GITHUB_WORKSPACE}/install/lib ./sycl_tests
 
     - name: run Metal tests (pcuda)
       run: |
